@@ -32,6 +32,8 @@
   RKNN 推理与检测节点，可选
 - [NAVIGATION_USAGE_GUIDE.md](./NAVIGATION_USAGE_GUIDE.md)
   更完整的建图、定位、导航使用说明
+- [GIT_WORKFLOW.md](./GIT_WORKFLOW.md)
+  工作区 Git 提交、分支、合并、回滚与回溯说明
 
 ## 当前导航链路
 
@@ -138,3 +140,4 @@ git push
 - `src/yolov11n_rknn` 包含模型与数据文件，仓库体积会比较大
 - `src/yesense_ros2` 是直接纳入工作区的源码目录，不是子模块
 - 更详细的导航运行步骤、排障和预设点说明见 [NAVIGATION_USAGE_GUIDE.md](./NAVIGATION_USAGE_GUIDE.md)
+- Git 日常使用和回溯流程见 [GIT_WORKFLOW.md](./GIT_WORKFLOW.md)
