@@ -17,7 +17,7 @@ controller_server:
     min_theta_velocity_threshold: 0.001    # 角速度死区阈值
     failure_tolerance: 0.3                 # 允许短时控制失败的容忍时间(s)
     progress_checker_plugin: "progress_checker"  # 进度检查器插件名
-    goal_checker_plugin: "goal_checker"          # 到点检查器插件名
+    goal_checker_plugins: ["goal_checker"]       # 到点检查器插件名列表（Humble 参数写法）
     controller_plugins: ["FollowPath"]           # 启用的局部控制插件列表
 
     FollowPath:
@@ -59,8 +59,8 @@ controller_server:
 
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"  # 到点检查器实现
-      xy_goal_tolerance: 0.06               # 收紧位置容差，提升停车位置精度
-      yaw_goal_tolerance: 0.08              # 收紧朝向容差(rad≈4.6°)，提升停车朝向精度
+      xy_goal_tolerance: 0.10               # 位置进入该范围后，不再回退到位置检查
+      yaw_goal_tolerance: 0.20              # 朝向容差，先保证稳定收敛，后续再按实机收紧
       stateful: true                        # 一旦进入xy容忍就不再回退xy检查，只做朝向修正
 
 planner_server:
@@ -70,7 +70,7 @@ planner_server:
     planner_plugins: ["GridBased"]          # 全局规划插件列表
     GridBased:
       plugin: "nav2_smac_planner/SmacPlannerHybrid"  # Smac Hybrid A* 规划器
-      tolerance: 0.5                        # 目标不可达时允许在附近容差(m)
+      tolerance: 0.10                       # 将近目标容差收紧，避免规划在目标附近找“替代终点”
       downsample_costmap: false
       downsampling_factor: 1
       allow_unknown: true                   # 是否允许穿过未知区域
@@ -79,7 +79,7 @@ planner_server:
       max_planning_time: 2.0
       motion_model_for_search: "DUBIN"
       angle_quantization_bins: 72
-      minimum_turning_radius: 0.20
+      minimum_turning_radius: 0.25
       reverse_penalty: 2.0
       change_penalty: 0.0
       non_straight_penalty: 1.20
@@ -137,9 +137,9 @@ bt_navigator:
     global_frame: "map"                               # 全局导航参考坐标系
     robot_base_frame: "base_link"                     # 机器人基座坐标系
     odom_topic: "/odom"                               # 里程计话题
-    bt_loop_duration: 10                              # 行为树循环周期(ms)
+    bt_loop_duration: 20                              # 行为树循环周期(ms)；低速真机保持足够响应，同时减少调度开销
     default_server_timeout: 20                        # 行为树节点默认超时(s)
-    enable_groot_monitoring: true                     # 是否启用 Groot 行为树监控
+    enable_groot_monitoring: false                    # 关闭 Groot 监控，减少额外发布与序列化开销
     # 行为树可用插件库（动作/条件节点）
     plugin_lib_names:
     - nav2_compute_path_to_pose_action_bt_node
@@ -172,7 +172,7 @@ bt_navigator:
     - nav2_is_path_valid_condition_bt_node
     - nav2_navigate_through_poses_action_bt_node
     - nav2_remove_passed_goals_action_bt_node
-    default_nav_to_pose_bt_node_xml: "navigate_to_pose_w_replanning_and_recovery.xml"      # 单目标导航默认行为树
+    default_nav_to_pose_bt_node_xml: "navigate_to_pose_w_path_invalid_replanning_and_recovery.xml" # 单目标导航默认行为树
     default_nav_through_poses_bt_node_xml: "navigate_to_pose_w_replanning_and_recovery.xml" # 多目标导航默认行为树
 
 bt_navigator_rclcpp_node:
@@ -183,7 +183,7 @@ local_costmap:
   local_costmap:
     ros__parameters:
       update_frequency: 10.0                 # 局部代价地图更新频率(Hz)，降低算力占用
-      publish_frequency: 10.0                # 局部代价地图发布频率(Hz)，减轻 RViz 刷新压力
+      publish_frequency: 5.0                 # 局部代价地图发布频率(Hz)，只影响显示链路，不影响内部控制更新
       global_frame: odom                    # 局部代价地图坐标系（通常 odom）
       robot_base_frame: base_link           # 机器人基座坐标系
       use_sim_time: false                   # 是否使用仿真时间
@@ -203,7 +203,7 @@ local_costmap:
         plugin: "nav2_costmap_2d::VoxelLayer"       # 三维体素障碍层（用激光更新）
         enabled: true                               # 是否启用
         footprint_clearing_enabled: true            # 清除机器人足迹内障碍，避免把机体自身打成障碍
-        publish_voxel_map: true                     # 是否发布体素可视化
+        publish_voxel_map: false                    # 关闭体素可视化发布，节省 CPU / 带宽
         origin_z: 0.0                               # 体素地图Z原点
         z_resolution: 0.05                          # Z方向分辨率
         z_voxels: 16                                # Z方向体素层数
@@ -221,13 +221,13 @@ local_costmap:
           obstacle_max_range: 2.5                   # 标障最大距离(m)
           obstacle_min_range: 0.46                  # 标障最小距离(m) - 覆盖 footprint 外接半径，忽略机体轮廓内点云
 
-      always_send_full_costmap: True                # 每次发布完整代价地图（调试友好）
+      always_send_full_costmap: False               # 改为增量更新，降低 RViz 和 DDS 负载
 
 global_costmap:
   global_costmap:
     ros__parameters:
       update_frequency: 3.0                         # 全局代价地图更新频率(Hz)，降低算力占用
-      publish_frequency: 2.0                        # 全局代价地图发布频率(Hz)，减轻 RViz 刷新压力
+      publish_frequency: 1.0                        # 全局代价地图发布频率(Hz)，显示足够且更省资源
       global_frame: map                             # 全局地图坐标系（map）
       robot_base_frame: base_link                   # 机器人基座坐标系
       use_sim_time: false                           # 是否使用仿真时间
@@ -261,7 +261,7 @@ global_costmap:
         cost_scaling_factor: 2.5                    # 膨胀代价衰减系数 - 降低梯度陡度
         inflation_radius: 0.3                      # 膨胀半径(m)，减小膨胀范围同时保持大于机体内切半径
 
-      always_send_full_costmap: True                # 每次发布完整代价地图
+      always_send_full_costmap: False               # 改为增量更新，降低 RViz 和 DDS 负载
 
 map_server:
   ros__parameters:

@@ -1,15 +1,30 @@
 #!/usr/bin/env python3
 
+import math
 from typing import Optional, Tuple
 
 import rclpy
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PoseStamped, Twist
+from nav_msgs.msg import Path
+from rclpy.duration import Duration
 from rclpy.node import Node
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformException, TransformListener
 from vmc_quadruped_controller.msg import MoveCmd
 
 
 def clamp(value: float, min_value: float, max_value: float) -> float:
     return max(min(value, max_value), min_value)
+
+
+def quaternion_to_yaw(x: float, y: float, z: float, w: float) -> float:
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(siny_cosp, cosy_cosp)
+
+
+def normalize_angle(angle: float) -> float:
+    return math.atan2(math.sin(angle), math.cos(angle))
 
 
 class CmdVelToMoveCmd(Node):
@@ -33,6 +48,19 @@ class CmdVelToMoveCmd(Node):
         self.declare_parameter('max_step_x_rate', 1.8)
         self.declare_parameter('max_step_y_rate', 1.8)
         self.declare_parameter('cmd_vel_timeout_sec', 0.25)
+        self.declare_parameter('goal_pose_topic', '/goal_pose')
+        self.declare_parameter('preset_goal_pose_topic', '/preset_current_goal')
+        self.declare_parameter('plan_topic', '/plan')
+        self.declare_parameter('global_plan_topic', '/global_plan')
+        self.declare_parameter('base_frame', 'base_link')
+        self.declare_parameter('final_align_enabled', True)
+        self.declare_parameter('final_align_xy_trigger', 0.08)
+        self.declare_parameter('final_align_yaw_trigger', 0.18)
+        self.declare_parameter('final_align_yaw_exit', 0.08)
+        self.declare_parameter('final_align_linear_scale', 0.15)
+        self.declare_parameter('final_align_max_linear_x', 0.02)
+        self.declare_parameter('final_align_angular_kp', 1.2)
+        self.declare_parameter('final_align_lookup_timeout_sec', 0.05)
 
         self._cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
         self._move_cmd_topic = self.get_parameter('move_cmd_topic').value
@@ -62,6 +90,37 @@ class CmdVelToMoveCmd(Node):
         self._cmd_vel_timeout_sec = float(
             self.get_parameter('cmd_vel_timeout_sec').value
         )
+        self._goal_pose_topic = self.get_parameter('goal_pose_topic').value
+        self._preset_goal_pose_topic = self.get_parameter(
+            'preset_goal_pose_topic'
+        ).value
+        self._plan_topic = self.get_parameter('plan_topic').value
+        self._global_plan_topic = self.get_parameter('global_plan_topic').value
+        self._base_frame = self.get_parameter('base_frame').value
+        self._final_align_enabled = bool(
+            self.get_parameter('final_align_enabled').value
+        )
+        self._final_align_xy_trigger = float(
+            self.get_parameter('final_align_xy_trigger').value
+        )
+        self._final_align_yaw_trigger = float(
+            self.get_parameter('final_align_yaw_trigger').value
+        )
+        self._final_align_yaw_exit = float(
+            self.get_parameter('final_align_yaw_exit').value
+        )
+        self._final_align_linear_scale = float(
+            self.get_parameter('final_align_linear_scale').value
+        )
+        self._final_align_max_linear_x = float(
+            self.get_parameter('final_align_max_linear_x').value
+        )
+        self._final_align_angular_kp = float(
+            self.get_parameter('final_align_angular_kp').value
+        )
+        self._final_align_lookup_timeout_sec = float(
+            self.get_parameter('final_align_lookup_timeout_sec').value
+        )
 
         self._last_angular_z = 0.0
         self._last_step_x = 0.0
@@ -69,10 +128,33 @@ class CmdVelToMoveCmd(Node):
         self._last_stamp: Optional[float] = None
         self._last_cmd_vel_rx_time: Optional[float] = None
         self._stopped_by_timeout = False
+        self._final_align_active = False
+        self._goal_pose: Optional[PoseStamped] = None
+        self._goal_pose_rx_time: float = 0.0
+        self._plan_goal_pose: Optional[PoseStamped] = None
+        self._plan_goal_pose_rx_time: float = 0.0
+
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=True)
 
         self._publisher = self.create_publisher(MoveCmd, self._move_cmd_topic, 20)
         self._subscriber = self.create_subscription(
             Twist, self._cmd_vel_topic, self._cmd_vel_callback, 20
+        )
+        self._goal_sub = self.create_subscription(
+            PoseStamped, self._goal_pose_topic, self._goal_pose_callback, 10
+        )
+        self._preset_goal_sub = self.create_subscription(
+            PoseStamped,
+            self._preset_goal_pose_topic,
+            self._goal_pose_callback,
+            10,
+        )
+        self._plan_sub = self.create_subscription(
+            Path, self._plan_topic, self._plan_callback, 10
+        )
+        self._global_plan_sub = self.create_subscription(
+            Path, self._global_plan_topic, self._plan_callback, 10
         )
         self._watchdog_timer = self.create_timer(0.05, self._watchdog_callback)
         self.get_logger().info(
@@ -82,8 +164,108 @@ class CmdVelToMoveCmd(Node):
             f'linear_x_scale={self._linear_x_scale}, angular_z_scale={self._angular_z_scale}, '
             f'min_nonzero_angular_z={self._min_nonzero_angular_z}, '
             f'min_nonzero_angular_linear_x_threshold={self._min_nonzero_angular_linear_x_threshold}, '
-            f'cmd_vel_timeout_sec={self._cmd_vel_timeout_sec}'
+            f'cmd_vel_timeout_sec={self._cmd_vel_timeout_sec}, '
+            f'final_align_enabled={self._final_align_enabled}'
         )
+
+    def _goal_pose_callback(self, msg: PoseStamped) -> None:
+        self._goal_pose = msg
+        self._goal_pose_rx_time = self.get_clock().now().nanoseconds / 1e9
+
+    def _plan_callback(self, msg: Path) -> None:
+        if not msg.poses:
+            return
+        self._plan_goal_pose = msg.poses[-1]
+        if not self._plan_goal_pose.header.frame_id:
+            self._plan_goal_pose.header.frame_id = msg.header.frame_id
+        self._plan_goal_pose_rx_time = self.get_clock().now().nanoseconds / 1e9
+
+    def _get_active_goal_pose(self) -> Optional[PoseStamped]:
+        if self._goal_pose is None:
+            return self._plan_goal_pose
+        if self._plan_goal_pose is None:
+            return self._goal_pose
+
+        same_frame = self._goal_pose.header.frame_id == self._plan_goal_pose.header.frame_id
+        if same_frame:
+            dx = self._goal_pose.pose.position.x - self._plan_goal_pose.pose.position.x
+            dy = self._goal_pose.pose.position.y - self._plan_goal_pose.pose.position.y
+            if math.hypot(dx, dy) <= 0.30:
+                return self._goal_pose
+
+        if self._goal_pose_rx_time >= self._plan_goal_pose_rx_time:
+            return self._goal_pose
+        return self._plan_goal_pose
+
+    def _maybe_apply_final_alignment(
+        self, linear_x: float, angular_z: float
+    ) -> Tuple[float, float]:
+        if not self._final_align_enabled:
+            self._final_align_active = False
+            return linear_x, angular_z
+
+        goal_pose = self._get_active_goal_pose()
+        if goal_pose is None or not goal_pose.header.frame_id:
+            self._final_align_active = False
+            return linear_x, angular_z
+
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                goal_pose.header.frame_id,
+                self._base_frame,
+                Time(),
+                timeout=Duration(seconds=self._final_align_lookup_timeout_sec),
+            )
+        except TransformException:
+            self._final_align_active = False
+            return linear_x, angular_z
+
+        robot_x = transform.transform.translation.x
+        robot_y = transform.transform.translation.y
+        goal_x = goal_pose.pose.position.x
+        goal_y = goal_pose.pose.position.y
+        dist = math.hypot(goal_x - robot_x, goal_y - robot_y)
+
+        robot_q = transform.transform.rotation
+        robot_yaw = quaternion_to_yaw(robot_q.x, robot_q.y, robot_q.z, robot_q.w)
+        goal_q = goal_pose.pose.orientation
+        goal_yaw = quaternion_to_yaw(goal_q.x, goal_q.y, goal_q.z, goal_q.w)
+        yaw_error = normalize_angle(goal_yaw - robot_yaw)
+
+        if self._final_align_active:
+            final_align = (
+                dist <= (self._final_align_xy_trigger + 0.03)
+                and abs(yaw_error) >= self._final_align_yaw_exit
+            )
+        else:
+            final_align = (
+                dist <= self._final_align_xy_trigger
+                and abs(yaw_error) >= self._final_align_yaw_trigger
+            )
+
+        if not final_align:
+            self._final_align_active = False
+            return linear_x, angular_z
+
+        linear_mag = min(
+            abs(linear_x) * self._final_align_linear_scale,
+            self._final_align_max_linear_x,
+        )
+        linear_x = math.copysign(linear_mag, linear_x) if linear_mag > 0.0 else 0.0
+        min_turn = max(self._min_nonzero_angular_z, self._deadzone)
+        angular_mag = clamp(
+            abs(self._final_align_angular_kp * yaw_error),
+            min_turn,
+            self._max_angular_z,
+        )
+        angular_z = angular_mag if yaw_error >= 0.0 else -angular_mag
+
+        if not self._final_align_active:
+            self.get_logger().info(
+                f'Final alignment assist active: dist={dist:.3f} m, yaw_error={yaw_error:.3f} rad'
+            )
+        self._final_align_active = True
+        return linear_x, angular_z
 
     def _publish_stop(self) -> None:
         self._last_angular_z = 0.0
@@ -149,6 +331,7 @@ class CmdVelToMoveCmd(Node):
         linear_x = -msg.linear.x if self._invert_linear_x else msg.linear.x
         angular_z = -msg.angular.z if self._invert_angular_z else msg.angular.z
         angular_z = clamp(angular_z, -self._max_angular_z, self._max_angular_z)
+        linear_x, angular_z = self._maybe_apply_final_alignment(linear_x, angular_z)
         in_place_turn = (
             abs(linear_x) <= self._min_nonzero_angular_linear_x_threshold
         )

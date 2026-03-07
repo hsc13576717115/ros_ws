@@ -96,7 +96,7 @@ def generate_launch_description():
     nav_to_pose_bt_xml = os.path.join(
         nav2_config_dir,
         'behavior_trees',
-        'navigate_to_pose_w_distance_replanning_and_recovery.xml'
+        'navigate_to_pose_w_path_invalid_replanning_and_recovery.xml'
     )
 
     # ============================================================================
@@ -333,6 +333,18 @@ def generate_launch_description():
             {'angular_z_scale': 0.45},
             {'invert_linear_x': LaunchConfiguration('cmd_invert_linear_x')},
             {'invert_angular_z': LaunchConfiguration('cmd_invert_angular_z')},
+            {'goal_pose_topic': '/goal_pose'},
+            {'preset_goal_pose_topic': '/preset_current_goal'},
+            {'plan_topic': '/plan'},
+            {'global_plan_topic': '/global_plan'},
+            {'base_frame': 'base_link'},
+            {'final_align_enabled': True},
+            {'final_align_xy_trigger': 0.08},
+            {'final_align_yaw_trigger': 0.18},
+            {'final_align_yaw_exit': 0.08},
+            {'final_align_linear_scale': 0.15},
+            {'final_align_max_linear_x': 0.02},
+            {'final_align_angular_kp': 1.2},
             {'min_nonzero_angular_z': 0.06},                    # 比死区略大，防止末端wz太小不动
             {'min_nonzero_angular_linear_x_threshold': 0.02},   # 更早允许纯转向阶段触发最小角速度
             {'max_angular_z': 0.24},        # 与 velocity_smoother / RotationShim 对齐

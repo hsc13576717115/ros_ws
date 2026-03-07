@@ -28,6 +28,7 @@ class NavigateGoalSender(Node):
         self._client = ActionClient(self, NavigateToPose, action_name)
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=True)
+        self._goal_pose_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
 
     def _resolve_goal_yaw(
         self,
@@ -82,6 +83,10 @@ class NavigateGoalSender(Node):
         goal.pose.pose.position.z = 0.0
         goal.pose.pose.orientation.z = math.sin(final_yaw / 2.0)
         goal.pose.pose.orientation.w = math.cos(final_yaw / 2.0)
+
+        # Mirror the requested target to /goal_pose so local helper nodes can
+        # apply final heading alignment policies consistently for CLI goals too.
+        self._goal_pose_pub.publish(goal.pose)
 
         self.get_logger().info(
             f'Sending goal: x={x:.3f}, y={y:.3f}, yaw={final_yaw:.3f} rad, frame={frame_id}'
