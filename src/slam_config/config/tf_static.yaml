@@ -1,0 +1,28 @@
+# Static TF configuration for SLAM
+# Defines the fixed transformations between robot base and sensors
+
+# base_link -> laser (N10P LiDAR)
+tf_laser:
+  ros__parameters:
+    frame_id: base_link
+    child_frame_id: laser
+    x: 0.0      # LiDAR at robot geometric center (front/back centered)
+    y: 0.0      # Centered laterally
+    z: 0.2      # 20cm height from ground
+    qx: 0.0
+    qy: 0.0
+    qz: 0.0
+    qw: 1.0
+
+# base_link -> gyro_link (IMU)
+tf_imu:
+  ros__parameters:
+    frame_id: base_link
+    child_frame_id: gyro_link
+    x: 0.0      # IMU at robot center
+    y: 0.0
+    z: 0.1      # 10cm height from ground
+    qx: 0.0
+    qy: 0.0
+    qz: 0.0
+    qw: 1.0

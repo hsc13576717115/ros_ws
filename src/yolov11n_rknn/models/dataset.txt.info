@@ -1,0 +1,26 @@
+# 量化校准数据集说明
+# 生成时间: 2026-03-03 17:40:47.606359
+# 数据目录: /home/orangepi/nav_ws/src/yolov11n_rknn/data
+# 图片数量: 1060
+#
+# 使用说明:
+#   - 当前使用相对路径 (相对于包根目录)
+#   - RKNN Toolkit 不支持注释，所以说明单独存放在此文件
+#   - 添加更多图片以提高量化精度 (推荐 50-200 张)
+#
+# 重新生成数据集:
+#   python3 update_dataset.py
+#
+#
+# 前 10 个文件:
+#   1. /home/orangepi/nav_ws/src/yolov11n_rknn/data/image_0.jpg
+#   2. /home/orangepi/nav_ws/src/yolov11n_rknn/data/image_1.jpg
+#   3. /home/orangepi/nav_ws/src/yolov11n_rknn/data/image_10.jpg
+#   4. /home/orangepi/nav_ws/src/yolov11n_rknn/data/image_100.jpg
+#   5. /home/orangepi/nav_ws/src/yolov11n_rknn/data/image_1000.jpg
+#   6. /home/orangepi/nav_ws/src/yolov11n_rknn/data/image_1001.jpg
+#   7. /home/orangepi/nav_ws/src/yolov11n_rknn/data/image_1002.jpg
+#   8. /home/orangepi/nav_ws/src/yolov11n_rknn/data/image_1003.jpg
+#   9. /home/orangepi/nav_ws/src/yolov11n_rknn/data/image_1004.jpg
+#   10. /home/orangepi/nav_ws/src/yolov11n_rknn/data/image_1005.jpg
+#   ... 还有 1050 个文件

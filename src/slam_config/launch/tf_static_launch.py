@@ -1,0 +1,74 @@
+#!/usr/bin/python3
+"""
+Static transform publisher for SLAM configuration
+Publishes fixed TF between base_link and sensors
+"""
+
+from launch import LaunchDescription
+from launch_ros.actions import Node
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+from ament_index_python.packages import get_package_share_directory
+import os
+
+
+def generate_launch_description():
+    """Generate launch description for static TF"""
+
+    config_file = os.path.join(
+        get_package_share_directory('slam_config'),
+        'config',
+        'tf_static.yaml'
+    )
+
+    imu_roll_arg = DeclareLaunchArgument(
+        'imu_roll_deg',
+        default_value='0.0',
+        description='Static TF roll from base_link to gyro_link (degrees)',
+    )
+    imu_pitch_arg = DeclareLaunchArgument(
+        'imu_pitch_deg',
+        default_value='0.0',
+        description='Static TF pitch from base_link to gyro_link (degrees)',
+    )
+    imu_yaw_arg = DeclareLaunchArgument(
+        'imu_yaw_deg',
+        default_value='0.0',
+        description='Static TF yaw from base_link to gyro_link (degrees)',
+    )
+
+    # base_link -> laser transform
+    tf_laser = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='tf_laser',
+        parameters=[config_file, {'use_yaml_as_config': True}],
+        arguments=[
+            '--x', '0.0', '--y', '0.0', '--z', '0.2',
+            '--qx', '0.0', '--qy', '0.0', '--qz', '0.0', '--qw', '1.0',
+            '--frame-id', 'base_link', '--child-frame-id', 'laser',
+        ]
+    )
+
+    # base_link -> gyro_link transform
+    tf_imu = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='tf_imu',
+        parameters=[config_file, {'use_yaml_as_config': True}],
+        arguments=[
+            '--x', '0.0', '--y', '0.0', '--z', '0.1',
+            '--roll', LaunchConfiguration('imu_roll_deg'),
+            '--pitch', LaunchConfiguration('imu_pitch_deg'),
+            '--yaw', LaunchConfiguration('imu_yaw_deg'),
+            '--frame-id', 'base_link', '--child-frame-id', 'gyro_link',
+        ]
+    )
+
+    return LaunchDescription([
+        imu_roll_arg,
+        imu_pitch_arg,
+        imu_yaw_arg,
+        tf_laser,
+        tf_imu,
+    ])

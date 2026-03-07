@@ -1,0 +1,30 @@
+# 预设点任务清单（map 坐标系，单位：米）
+# 使用方法：
+# 1) 按实际地图填写 x / y / yaw_deg
+# 2) 将需要执行的点位 enabled 改为 true
+# 3) 通过 launch 参数 start_preset_mission:=true 启动任务
+
+waypoints:
+  - {name: P01, x: 0.0, y: 0.0, yaw_deg: 0.0, enabled: true}
+  - {name: P02, x: 4.0, y: 0.0, yaw_deg: -90.0, enabled: true}
+  - {name: P03, x: 4.0, y: -4.0, yaw_deg: -90.0, enabled: false}
+  - {name: P04, x: 1.8, y: 0.0, yaw_deg: 0.0, enabled: false}
+  - {name: P05, x: 2.4, y: 0.0, yaw_deg: 0.0, enabled: false}
+
+  - {name: P06, x: 2.4, y: 0.6, yaw_deg: 90.0, enabled: false}
+  - {name: P07, x: 2.4, y: 1.2, yaw_deg: 90.0, enabled: false}
+  - {name: P08, x: 2.4, y: 1.8, yaw_deg: 90.0, enabled: false}
+  - {name: P09, x: 2.4, y: 2.4, yaw_deg: 90.0, enabled: false}
+  - {name: P10, x: 2.4, y: 3.0, yaw_deg: 90.0, enabled: false}
+
+  - {name: P11, x: 1.8, y: 3.0, yaw_deg: 180.0, enabled: false}
+  - {name: P12, x: 1.2, y: 3.0, yaw_deg: 180.0, enabled: false}
+  - {name: P13, x: 0.6, y: 3.0, yaw_deg: 180.0, enabled: false}
+  - {name: P14, x: 0.0, y: 3.0, yaw_deg: 180.0, enabled: false}
+  - {name: P15, x: -0.6, y: 3.0, yaw_deg: 180.0, enabled: false}
+
+  - {name: P16, x: -0.6, y: 2.4, yaw_deg: -90.0, enabled: false}
+  - {name: P17, x: -0.6, y: 1.8, yaw_deg: -90.0, enabled: false}
+  - {name: P18, x: -0.6, y: 1.2, yaw_deg: -90.0, enabled: false}
+  - {name: P19, x: -0.6, y: 0.6, yaw_deg: -90.0, enabled: false}
+  - {name: P20, x: -0.6, y: 0.0, yaw_deg: -90.0, enabled: false}
