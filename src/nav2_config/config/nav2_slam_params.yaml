@@ -59,8 +59,8 @@ controller_server:
 
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"  # 到点检查器实现
-      xy_goal_tolerance: 0.10               # 位置进入该范围后，不再回退到位置检查
-      yaw_goal_tolerance: 0.20              # 朝向容差，先保证稳定收敛，后续再按实机收紧
+      xy_goal_tolerance: 0.30               # 位置进入该范围后，不再回退到位置检查
+      yaw_goal_tolerance: 0.30              # 朝向容差，先保证稳定收敛，后续再按实机收紧
       stateful: true                        # 一旦进入xy容忍就不再回退xy检查，只做朝向修正
 
 planner_server:
