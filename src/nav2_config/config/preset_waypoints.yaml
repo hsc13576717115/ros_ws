@@ -6,8 +6,8 @@
 
 waypoints:
   - {name: P01, x: 0.0, y: 0.0, yaw_deg: 0.0, enabled: true}
-  - {name: P02, x: 4.0, y: 0.0, yaw_deg: -90.0, enabled: true}
-  - {name: P03, x: 4.0, y: -4.0, yaw_deg: -90.0, enabled: false}
+  - {name: P02, x: 4.0, y: 0.0, yaw_deg: 0.0, enabled: true}
+  - {name: P03, x: 4.0, y: 0.0, yaw_deg: -90.0, enabled: true}
   - {name: P04, x: 1.8, y: 0.0, yaw_deg: 0.0, enabled: false}
   - {name: P05, x: 2.4, y: 0.0, yaw_deg: 0.0, enabled: false}
 
