@@ -3,16 +3,19 @@
 import math
 import os
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import rclpy
 import yaml
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Point, PoseStamped
-from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import NavigateToPose, Spin
 from nav_msgs.msg import Path
 from rclpy.action import ActionClient
+from rclpy.duration import Duration
 from rclpy.node import Node
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformException, TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
 
 
@@ -28,18 +31,34 @@ def yaw_to_quat_z_w(yaw: float) -> tuple[float, float]:
     return math.sin(yaw * 0.5), math.cos(yaw * 0.5)
 
 
+def quaternion_to_yaw(x: float, y: float, z: float, w: float) -> float:
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(siny_cosp, cosy_cosp)
+
+
+def normalize_angle(angle: float) -> float:
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
 class PresetWaypointMission(Node):
     def __init__(self) -> None:
         super().__init__('preset_waypoint_mission')
 
         self.declare_parameter('waypoint_file', '')
         self.declare_parameter('frame_id', 'map')
+        self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('action_name', '/navigate_to_pose')
+        self.declare_parameter('spin_action_name', '/spin')
         self.declare_parameter('auto_start', True)
         self.declare_parameter('loop_mission', False)
         self.declare_parameter('stop_on_failure', True)
         self.declare_parameter('retry_per_waypoint', 1)
         self.declare_parameter('pause_after_reach_sec', 0.2)
+        self.declare_parameter('same_position_tolerance', 0.05)
+        self.declare_parameter('same_yaw_tolerance_deg', 5.0)
+        self.declare_parameter('spin_time_allowance_sec', 20.0)
+        self.declare_parameter('spin_lookup_timeout_sec', 0.10)
         self.declare_parameter('markers_topic', '/preset_waypoints')
         self.declare_parameter('route_topic', '/preset_route')
         self.declare_parameter('current_goal_topic', '/preset_current_goal')
@@ -48,7 +67,9 @@ class PresetWaypointMission(Node):
 
         self._waypoint_file = str(self.get_parameter('waypoint_file').value)
         self._frame_id = str(self.get_parameter('frame_id').value)
+        self._base_frame = str(self.get_parameter('base_frame').value)
         self._action_name = str(self.get_parameter('action_name').value)
+        self._spin_action_name = str(self.get_parameter('spin_action_name').value)
         self._auto_start = self._to_bool(self.get_parameter('auto_start').value)
         self._loop_mission = self._to_bool(self.get_parameter('loop_mission').value)
         self._stop_on_failure = self._to_bool(
@@ -57,6 +78,18 @@ class PresetWaypointMission(Node):
         self._retry_per_waypoint = int(self.get_parameter('retry_per_waypoint').value)
         self._pause_after_reach_sec = float(
             self.get_parameter('pause_after_reach_sec').value
+        )
+        self._same_position_tolerance = max(
+            0.0, float(self.get_parameter('same_position_tolerance').value)
+        )
+        self._same_yaw_tolerance = math.radians(
+            float(self.get_parameter('same_yaw_tolerance_deg').value)
+        )
+        self._spin_time_allowance_sec = max(
+            0.0, float(self.get_parameter('spin_time_allowance_sec').value)
+        )
+        self._spin_lookup_timeout_sec = max(
+            0.0, float(self.get_parameter('spin_lookup_timeout_sec').value)
         )
         self._marker_point_scale = float(
             self.get_parameter('marker_point_scale').value
@@ -71,6 +104,9 @@ class PresetWaypointMission(Node):
         self._route_pub = self.create_publisher(Path, route_topic, 10)
         self._goal_pub = self.create_publisher(PoseStamped, current_goal_topic, 10)
         self._action_client = ActionClient(self, NavigateToPose, self._action_name)
+        self._spin_action_client = ActionClient(self, Spin, self._spin_action_name)
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=True)
 
         self._waypoints: List[Waypoint] = self._load_waypoints(self._waypoint_file)
         self._index = 0
@@ -80,13 +116,15 @@ class PresetWaypointMission(Node):
         self._goal_in_flight = False
         self._next_send_time_sec = self._now_sec()
         self._last_wait_server_log_sec = 0.0
+        self._active_goal_kind = 'navigate'
 
         self.create_timer(0.2, self._tick)
         self.create_timer(0.5, self._publish_visualization)
 
         self.get_logger().info(
             f'Preset waypoint mission ready. waypoints={len(self._waypoints)}, '
-            f'action={self._action_name}, frame={self._frame_id}, auto_start={self._auto_start}'
+            f'action={self._action_name}, spin_action={self._spin_action_name}, '
+            f'frame={self._frame_id}, auto_start={self._auto_start}'
         )
 
     def _now_sec(self) -> float:
@@ -155,6 +193,56 @@ class PresetWaypointMission(Node):
         pose.pose.orientation.w = qw
         return pose
 
+    def _get_previous_waypoint(self) -> Optional[Waypoint]:
+        if self._index <= 0:
+            return None
+        return self._waypoints[self._index - 1]
+
+    def _should_spin_to_current_waypoint(self) -> bool:
+        previous = self._get_previous_waypoint()
+        if previous is None or self._index >= len(self._waypoints):
+            return False
+
+        current = self._waypoints[self._index]
+        position_delta = math.hypot(current.x - previous.x, current.y - previous.y)
+        yaw_delta = abs(normalize_angle(current.yaw - previous.yaw))
+        return (
+            position_delta <= self._same_position_tolerance
+            and yaw_delta > self._same_yaw_tolerance
+        )
+
+    def _get_robot_yaw(self) -> Optional[float]:
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                self._frame_id,
+                self._base_frame,
+                Time(),
+                timeout=Duration(seconds=self._spin_lookup_timeout_sec),
+            )
+        except TransformException as exc:
+            self.get_logger().warn(
+                f'Failed to lookup {self._frame_id} -> {self._base_frame} for spin goal: {exc}'
+            )
+            return None
+
+        q = transform.transform.rotation
+        return quaternion_to_yaw(q.x, q.y, q.z, q.w)
+
+    def _wait_for_current_action_server(self, now_sec: float) -> bool:
+        action_client = self._spin_action_client if self._should_spin_to_current_waypoint() else self._action_client
+        action_name = self._spin_action_name if action_client is self._spin_action_client else self._action_name
+        action_label = 'Spin' if action_client is self._spin_action_client else 'NavigateToPose'
+
+        if action_client.wait_for_server(timeout_sec=0.0):
+            return True
+
+        if (now_sec - self._last_wait_server_log_sec) > 2.0:
+            self._last_wait_server_log_sec = now_sec
+            self.get_logger().info(
+                f'Waiting for {action_label} action server: {action_name}'
+            )
+        return False
+
     def _tick(self) -> None:
         if self._mission_done or not self._mission_started or not self._waypoints:
             return
@@ -174,27 +262,51 @@ class PresetWaypointMission(Node):
                 self.get_logger().info('Preset waypoint mission completed.')
                 return
 
-        if not self._action_client.wait_for_server(timeout_sec=0.0):
-            if (now_sec - self._last_wait_server_log_sec) > 2.0:
-                self._last_wait_server_log_sec = now_sec
-                self.get_logger().info(
-                    f'Waiting for Nav2 action server: {self._action_name}'
-                )
+        if not self._wait_for_current_action_server(now_sec):
             return
 
         self._send_current_goal()
 
     def _send_current_goal(self) -> None:
         wp = self._waypoints[self._index]
+        goal_pose = self._build_pose(wp)
+        self._goal_pub.publish(goal_pose)
+
+        if self._should_spin_to_current_waypoint():
+            self._send_spin_goal(wp)
+            return
+
         goal = NavigateToPose.Goal()
-        goal.pose = self._build_pose(wp)
-        self._goal_pub.publish(goal.pose)
+        goal.pose = goal_pose
         self.get_logger().info(
             f'Sending waypoint [{self._index + 1}/{len(self._waypoints)}] '
             f'{wp.name}: x={wp.x:.3f}, y={wp.y:.3f}, yaw={wp.yaw:.3f}'
         )
         future = self._action_client.send_goal_async(goal)
         future.add_done_callback(self._on_goal_response)
+        self._active_goal_kind = 'navigate'
+        self._goal_in_flight = True
+
+    def _send_spin_goal(self, wp: Waypoint) -> None:
+        robot_yaw = self._get_robot_yaw()
+        if robot_yaw is None:
+            self._goal_in_flight = False
+            self._next_send_time_sec = self._now_sec() + 1.0
+            return
+
+        spin_goal = Spin.Goal()
+        spin_goal.target_yaw = float(normalize_angle(wp.yaw - robot_yaw))
+        spin_goal.time_allowance = Duration(
+            seconds=self._spin_time_allowance_sec
+        ).to_msg()
+        self.get_logger().info(
+            f'Sending spin waypoint [{self._index + 1}/{len(self._waypoints)}] '
+            f'{wp.name}: x={wp.x:.3f}, y={wp.y:.3f}, target_yaw={wp.yaw:.3f}, '
+            f'spin_delta={spin_goal.target_yaw:.3f}'
+        )
+        future = self._spin_action_client.send_goal_async(spin_goal)
+        future.add_done_callback(self._on_spin_goal_response)
+        self._active_goal_kind = 'spin'
         self._goal_in_flight = True
 
     def _on_goal_response(self, future) -> None:
@@ -214,6 +326,23 @@ class PresetWaypointMission(Node):
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(self._on_goal_result)
 
+    def _on_spin_goal_response(self, future) -> None:
+        try:
+            goal_handle = future.result()
+        except Exception as exc:
+            self.get_logger().error(f'Failed to send spin goal: {exc}')
+            self._goal_in_flight = False
+            self._next_send_time_sec = self._now_sec() + 1.0
+            return
+
+        if goal_handle is None or not goal_handle.accepted:
+            self.get_logger().warn('Spin goal rejected by Nav2.')
+            self._handle_goal_failure('spin_rejected')
+            return
+
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self._on_goal_result)
+
     def _on_goal_result(self, future) -> None:
         try:
             wrapped = future.result()
@@ -226,11 +355,13 @@ class PresetWaypointMission(Node):
         if status == GoalStatus.STATUS_SUCCEEDED:
             wp = self._waypoints[self._index]
             self.get_logger().info(
-                f'Waypoint reached [{self._index + 1}/{len(self._waypoints)}]: {wp.name}'
+                f'Waypoint reached [{self._index + 1}/{len(self._waypoints)}] '
+                f'({self._active_goal_kind}): {wp.name}'
             )
             self._index += 1
             self._retry_count = 0
             self._goal_in_flight = False
+            self._active_goal_kind = 'navigate'
             self._next_send_time_sec = self._now_sec() + self._pause_after_reach_sec
             return
 
@@ -250,6 +381,7 @@ class PresetWaypointMission(Node):
         self.get_logger().error(f'Waypoint failed ({reason}): {wp.name}')
         self._goal_in_flight = False
         self._retry_count = 0
+        self._active_goal_kind = 'navigate'
 
         if self._stop_on_failure:
             self._mission_done = True

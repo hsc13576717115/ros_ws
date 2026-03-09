@@ -32,7 +32,7 @@ controller_server:
       rotate_to_goal_heading: true         # 进目标区后只做原地朝向对齐（最短角路径）
       closed_loop: true                    # 用里程计角速度闭环约束旋转过程
 
-      desired_linear_vel: 0.14             # 室内平地低速巡航，优先跟踪精度
+      desired_linear_vel: 0.20             # 室内平地低速巡航，优先跟踪精度
       lookahead_dist: 0.45                 # 减小前瞻，提升小空间路径贴合度
       min_lookahead_dist: 0.22             # 最小前瞻距离(m)
       max_lookahead_dist: 0.60             # 最大前瞻距离(m)
@@ -59,8 +59,8 @@ controller_server:
 
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"  # 到点检查器实现
-      xy_goal_tolerance: 0.10               # 位置进入该范围后，不再回退到位置检查
-      yaw_goal_tolerance: 0.20              # 朝向容差，先保证稳定收敛，后续再按实机收紧
+      xy_goal_tolerance: 0.20               # 位置进入该范围后，不再回退到位置检查
+      yaw_goal_tolerance: 0.30              # 朝向容差，先保证稳定收敛，后续再按实机收紧
       stateful: true                        # 一旦进入xy容忍就不再回退xy检查，只做朝向修正
 
 planner_server:
