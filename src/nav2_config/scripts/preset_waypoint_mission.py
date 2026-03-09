@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
+import json
 import math
 import os
-from dataclasses import dataclass
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
 import rclpy
 import yaml
@@ -15,8 +16,18 @@ from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.time import Time
+from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
+from vision_msgs.msg import Detection2DArray
 from visualization_msgs.msg import Marker, MarkerArray
+
+
+@dataclass
+class YoloTask:
+    enabled: bool = False
+    settle_sec: float = 1.0
+    timeout_sec: float = 4.0
+    min_score: float = 0.5
 
 
 @dataclass
@@ -25,6 +36,13 @@ class Waypoint:
     x: float
     y: float
     yaw: float
+    yolo: YoloTask = field(default_factory=YoloTask)
+
+
+@dataclass
+class YoloObservation:
+    count: int = 0
+    best_score: float = 0.0
 
 
 def yaw_to_quat_z_w(yaw: float) -> tuple[float, float]:
@@ -64,6 +82,10 @@ class PresetWaypointMission(Node):
         self.declare_parameter('current_goal_topic', '/preset_current_goal')
         self.declare_parameter('marker_point_scale', 0.22)
         self.declare_parameter('marker_text_scale', 0.18)
+        self.declare_parameter('yolo_enable_topic', '/yolo/enable')
+        self.declare_parameter('yolo_detection_topic', '/yolo/detections')
+        self.declare_parameter('yolo_result_topic', '/preset_yolo_result')
+        self.declare_parameter('yolo_result_text_scale', 0.14)
 
         self._waypoint_file = str(self.get_parameter('waypoint_file').value)
         self._frame_id = str(self.get_parameter('frame_id').value)
@@ -95,14 +117,28 @@ class PresetWaypointMission(Node):
             self.get_parameter('marker_point_scale').value
         )
         self._marker_text_scale = float(self.get_parameter('marker_text_scale').value)
+        self._yolo_result_text_scale = float(
+            self.get_parameter('yolo_result_text_scale').value
+        )
 
         markers_topic = str(self.get_parameter('markers_topic').value)
         route_topic = str(self.get_parameter('route_topic').value)
         current_goal_topic = str(self.get_parameter('current_goal_topic').value)
+        yolo_enable_topic = str(self.get_parameter('yolo_enable_topic').value)
+        yolo_detection_topic = str(self.get_parameter('yolo_detection_topic').value)
+        yolo_result_topic = str(self.get_parameter('yolo_result_topic').value)
 
         self._marker_pub = self.create_publisher(MarkerArray, markers_topic, 10)
         self._route_pub = self.create_publisher(Path, route_topic, 10)
         self._goal_pub = self.create_publisher(PoseStamped, current_goal_topic, 10)
+        self._yolo_enable_pub = self.create_publisher(Bool, yolo_enable_topic, 10)
+        self._yolo_result_pub = self.create_publisher(String, yolo_result_topic, 10)
+        self._yolo_sub = self.create_subscription(
+            Detection2DArray,
+            yolo_detection_topic,
+            self._yolo_detection_callback,
+            20,
+        )
         self._action_client = ActionClient(self, NavigateToPose, self._action_name)
         self._spin_action_client = ActionClient(self, Spin, self._spin_action_name)
         self._tf_buffer = Buffer()
@@ -117,6 +153,17 @@ class PresetWaypointMission(Node):
         self._next_send_time_sec = self._now_sec()
         self._last_wait_server_log_sec = 0.0
         self._active_goal_kind = 'navigate'
+        self._yolo_enabled = False
+        self._yolo_task_active = False
+        self._yolo_collect_start_sec = 0.0
+        self._yolo_collect_deadline_sec = 0.0
+        self._yolo_task_index: Optional[int] = None
+        self._yolo_observations: Dict[str, YoloObservation] = {}
+        self._yolo_result_by_waypoint: Dict[str, str] = {}
+        self._yolo_has_detection_by_waypoint: Dict[str, bool] = {}
+        self._yolo_default_task = YoloTask()
+
+        self._set_yolo_enabled(False, force=True)
 
         self.create_timer(0.2, self._tick)
         self.create_timer(0.5, self._publish_visualization)
@@ -140,6 +187,48 @@ class PresetWaypointMission(Node):
             return value.strip().lower() in ('1', 'true', 'yes', 'on')
         return bool(value)
 
+    def _parse_yolo_defaults(self, data) -> YoloTask:
+        cfg = data if isinstance(data, dict) else {}
+        settle_sec = max(0.0, float(cfg.get('settle_sec', 1.0)))
+        timeout_sec = max(0.1, float(cfg.get('timeout_sec', 4.0)))
+        min_score = float(cfg.get('min_score', 0.5))
+        min_score = max(0.0, min(1.0, min_score))
+        return YoloTask(
+            enabled=False,
+            settle_sec=settle_sec,
+            timeout_sec=timeout_sec,
+            min_score=min_score,
+        )
+
+    def _parse_yolo_task(self, item: dict) -> YoloTask:
+        defaults = self._yolo_default_task
+        raw_cfg = item.get('yolo', item.get('yolo_enabled', False))
+        enabled = self._to_bool(raw_cfg)
+        settle_sec = defaults.settle_sec
+        timeout_sec = defaults.timeout_sec
+        min_score = defaults.min_score
+
+        # Keep compatibility with the previous waypoint-local object form.
+        if isinstance(raw_cfg, dict):
+            enabled = self._to_bool(raw_cfg.get('enabled', False))
+            settle_sec = max(
+                0.0,
+                float(raw_cfg.get('settle_sec', item.get('yolo_settle_sec', settle_sec))),
+            )
+            timeout_sec = max(
+                0.1,
+                float(raw_cfg.get('timeout_sec', item.get('yolo_timeout_sec', timeout_sec))),
+            )
+            min_score = float(raw_cfg.get('min_score', item.get('yolo_min_score', min_score)))
+            min_score = max(0.0, min(1.0, min_score))
+
+        return YoloTask(
+            enabled=enabled,
+            settle_sec=settle_sec,
+            timeout_sec=timeout_sec,
+            min_score=min_score,
+        )
+
     def _load_waypoints(self, file_path: str) -> List[Waypoint]:
         if not file_path:
             self.get_logger().error('Parameter waypoint_file is empty.')
@@ -154,6 +243,10 @@ class PresetWaypointMission(Node):
         except Exception as exc:
             self.get_logger().error(f'Failed to load waypoint file: {exc}')
             return []
+
+        self._yolo_default_task = self._parse_yolo_defaults(
+            data.get('yolo', {}) if isinstance(data, dict) else {}
+        )
 
         raw_items = data.get('waypoints', data if isinstance(data, list) else [])
         if not isinstance(raw_items, list):
@@ -177,7 +270,15 @@ class PresetWaypointMission(Node):
                 self.get_logger().warn(f'Skip invalid waypoint at index {i}.')
                 continue
             name = str(item.get('name', f'P{i + 1:02d}'))
-            waypoints.append(Waypoint(name=name, x=x, y=y, yaw=yaw))
+            waypoints.append(
+                Waypoint(
+                    name=name,
+                    x=x,
+                    y=y,
+                    yaw=yaw,
+                    yolo=self._parse_yolo_task(item),
+                )
+            )
 
         return waypoints
 
@@ -229,9 +330,19 @@ class PresetWaypointMission(Node):
         return quaternion_to_yaw(q.x, q.y, q.z, q.w)
 
     def _wait_for_current_action_server(self, now_sec: float) -> bool:
-        action_client = self._spin_action_client if self._should_spin_to_current_waypoint() else self._action_client
-        action_name = self._spin_action_name if action_client is self._spin_action_client else self._action_name
-        action_label = 'Spin' if action_client is self._spin_action_client else 'NavigateToPose'
+        action_client = (
+            self._spin_action_client
+            if self._should_spin_to_current_waypoint()
+            else self._action_client
+        )
+        action_name = (
+            self._spin_action_name
+            if action_client is self._spin_action_client
+            else self._action_name
+        )
+        action_label = (
+            'Spin' if action_client is self._spin_action_client else 'NavigateToPose'
+        )
 
         if action_client.wait_for_server(timeout_sec=0.0):
             return True
@@ -243,11 +354,27 @@ class PresetWaypointMission(Node):
             )
         return False
 
+    def _set_yolo_enabled(self, enabled: bool, force: bool = False) -> None:
+        if not force and self._yolo_enabled == enabled:
+            return
+
+        self._yolo_enabled = enabled
+        msg = Bool()
+        msg.data = enabled
+        self._yolo_enable_pub.publish(msg)
+        self.get_logger().info(
+            f'YOLO detection {"enabled" if enabled else "disabled"} for mission flow.'
+        )
+
     def _tick(self) -> None:
         if self._mission_done or not self._mission_started or not self._waypoints:
             return
         if self._goal_in_flight:
             return
+        if self._yolo_task_active:
+            self._tick_yolo_task()
+            return
+
         now_sec = self._now_sec()
         if now_sec < self._next_send_time_sec:
             return
@@ -259,6 +386,7 @@ class PresetWaypointMission(Node):
                 self.get_logger().info('Mission loop enabled, restarting from waypoint 1.')
             else:
                 self._mission_done = True
+                self._set_yolo_enabled(False)
                 self.get_logger().info('Preset waypoint mission completed.')
                 return
 
@@ -266,6 +394,12 @@ class PresetWaypointMission(Node):
             return
 
         self._send_current_goal()
+
+    def _tick_yolo_task(self) -> None:
+        now_sec = self._now_sec()
+        if now_sec < self._yolo_collect_deadline_sec:
+            return
+        self._finish_yolo_task()
 
     def _send_current_goal(self) -> None:
         wp = self._waypoints[self._index]
@@ -343,6 +477,117 @@ class PresetWaypointMission(Node):
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(self._on_goal_result)
 
+    def _start_yolo_task(self, wp: Waypoint) -> None:
+        now_sec = self._now_sec()
+        self._yolo_task_active = True
+        self._yolo_task_index = self._index
+        self._yolo_collect_start_sec = now_sec + wp.yolo.settle_sec
+        self._yolo_collect_deadline_sec = self._yolo_collect_start_sec + wp.yolo.timeout_sec
+        self._yolo_observations.clear()
+        self._active_goal_kind = 'yolo'
+        self._set_yolo_enabled(True)
+        self.get_logger().info(
+            f'Starting YOLO task at waypoint {wp.name}: '
+            f'settle={wp.yolo.settle_sec:.1f}s, '
+            f'window={wp.yolo.timeout_sec:.1f}s, '
+            f'min_score={wp.yolo.min_score:.2f}'
+        )
+
+    def _build_yolo_result_payload(self, wp: Waypoint) -> dict:
+        detections = [
+            {
+                'class_id': class_id,
+                'count': observation.count,
+                'best_score': round(observation.best_score, 3),
+            }
+            for class_id, observation in sorted(
+                self._yolo_observations.items(),
+                key=lambda item: (-item[1].best_score, item[0]),
+            )
+        ]
+        has_detection = bool(detections)
+        summary = (
+            ', '.join(
+                f'{item["class_id"]}@{item["best_score"]:.2f} x{item["count"]}'
+                for item in detections
+            )
+            if detections
+            else 'none'
+        )
+
+        return {
+            'waypoint': wp.name,
+            'x': round(wp.x, 3),
+            'y': round(wp.y, 3),
+            'yaw': round(wp.yaw, 3),
+            'success': True,
+            'has_detection': has_detection,
+            'min_score': round(wp.yolo.min_score, 3),
+            'detections': detections,
+            'summary': summary,
+        }
+
+    def _finish_yolo_task(self) -> None:
+        if self._yolo_task_index is None or self._yolo_task_index >= len(self._waypoints):
+            self._yolo_task_active = False
+            self._set_yolo_enabled(False)
+            return
+
+        wp = self._waypoints[self._yolo_task_index]
+        payload = self._build_yolo_result_payload(wp)
+        payload_json = json.dumps(payload, ensure_ascii=False)
+
+        msg = String()
+        msg.data = payload_json
+        self._yolo_result_pub.publish(msg)
+
+        self._yolo_result_by_waypoint[wp.name] = payload['summary']
+        self._yolo_has_detection_by_waypoint[wp.name] = bool(payload['has_detection'])
+
+        if payload['has_detection']:
+            self.get_logger().info(
+                f'YOLO task finished at {wp.name}: {payload["summary"]}'
+            )
+        else:
+            self.get_logger().info(
+                f'YOLO task finished at {wp.name}: no valid detection in the time window.'
+            )
+
+        self._yolo_task_active = False
+        self._yolo_task_index = None
+        self._yolo_observations.clear()
+        self._set_yolo_enabled(False)
+        self._index += 1
+        self._retry_count = 0
+        self._active_goal_kind = 'navigate'
+        self._next_send_time_sec = self._now_sec() + self._pause_after_reach_sec
+
+    def _yolo_detection_callback(self, msg: Detection2DArray) -> None:
+        if not self._yolo_task_active or self._yolo_task_index is None:
+            return
+        if self._yolo_task_index >= len(self._waypoints):
+            return
+
+        now_sec = self._now_sec()
+        if now_sec < self._yolo_collect_start_sec:
+            return
+
+        wp = self._waypoints[self._yolo_task_index]
+        for detection in msg.detections:
+            if not detection.results:
+                continue
+            hypothesis = max(
+                detection.results,
+                key=lambda result: float(result.hypothesis.score),
+            )
+            score = float(hypothesis.hypothesis.score)
+            if score < wp.yolo.min_score:
+                continue
+            class_id = hypothesis.hypothesis.class_id.strip() or 'unknown'
+            observation = self._yolo_observations.setdefault(class_id, YoloObservation())
+            observation.count += 1
+            observation.best_score = max(observation.best_score, score)
+
     def _on_goal_result(self, future) -> None:
         try:
             wrapped = future.result()
@@ -358,9 +603,14 @@ class PresetWaypointMission(Node):
                 f'Waypoint reached [{self._index + 1}/{len(self._waypoints)}] '
                 f'({self._active_goal_kind}): {wp.name}'
             )
+            self._goal_in_flight = False
+
+            if wp.yolo.enabled:
+                self._start_yolo_task(wp)
+                return
+
             self._index += 1
             self._retry_count = 0
-            self._goal_in_flight = False
             self._active_goal_kind = 'navigate'
             self._next_send_time_sec = self._now_sec() + self._pause_after_reach_sec
             return
@@ -382,6 +632,10 @@ class PresetWaypointMission(Node):
         self._goal_in_flight = False
         self._retry_count = 0
         self._active_goal_kind = 'navigate'
+        self._set_yolo_enabled(False)
+        self._yolo_task_active = False
+        self._yolo_task_index = None
+        self._yolo_observations.clear()
 
         if self._stop_on_failure:
             self._mission_done = True
@@ -459,6 +713,32 @@ class PresetWaypointMission(Node):
             points.points.append(pt)
         markers.markers.append(points)
 
+        yolo_points = Marker()
+        yolo_points.header.stamp = stamp
+        yolo_points.header.frame_id = self._frame_id
+        yolo_points.ns = 'preset_yolo_waypoints'
+        yolo_points.id = 4
+        yolo_points.type = Marker.SPHERE_LIST
+        yolo_points.action = Marker.ADD
+        yolo_points.pose.orientation.w = 1.0
+        yolo_points.scale.x = self._marker_point_scale * 0.75
+        yolo_points.scale.y = self._marker_point_scale * 0.75
+        yolo_points.scale.z = self._marker_point_scale * 0.75
+        yolo_points.color.a = 0.98
+        yolo_points.color.r = 1.0
+        yolo_points.color.g = 0.45
+        yolo_points.color.b = 0.0
+        for wp in self._waypoints:
+            if not wp.yolo.enabled:
+                continue
+            pt = Point()
+            pt.x = wp.x
+            pt.y = wp.y
+            pt.z = 0.18
+            yolo_points.points.append(pt)
+        if yolo_points.points:
+            markers.markers.append(yolo_points)
+
         for i, wp in enumerate(self._waypoints):
             text = Marker()
             text.header.stamp = stamp
@@ -476,8 +756,50 @@ class PresetWaypointMission(Node):
             text.color.r = 1.0
             text.color.g = 1.0
             text.color.b = 0.0
-            text.text = f'{i + 1:02d}:{wp.name}'
+            label = f'{i + 1:02d}:{wp.name}'
+            if wp.yolo.enabled:
+                label += ' [YOLO]'
+            text.text = label
             markers.markers.append(text)
+
+            if not wp.yolo.enabled:
+                continue
+
+            result = Marker()
+            result.header.stamp = stamp
+            result.header.frame_id = self._frame_id
+            result.ns = 'preset_yolo_result'
+            result.id = 300 + i
+            result.type = Marker.TEXT_VIEW_FACING
+            result.action = Marker.ADD
+            result.pose.position.x = wp.x
+            result.pose.position.y = wp.y
+            result.pose.position.z = 0.55
+            result.pose.orientation.w = 1.0
+            result.scale.z = self._yolo_result_text_scale
+            result.color.a = 1.0
+            summary = self._yolo_result_by_waypoint.get(wp.name)
+            if self._yolo_task_active and self._yolo_task_index == i:
+                result.color.r = 1.0
+                result.color.g = 0.6
+                result.color.b = 0.0
+                result.text = 'YOLO: running...'
+            elif summary:
+                if self._yolo_has_detection_by_waypoint.get(wp.name, False):
+                    result.color.r = 0.1
+                    result.color.g = 1.0
+                    result.color.b = 0.1
+                else:
+                    result.color.r = 0.8
+                    result.color.g = 0.8
+                    result.color.b = 0.8
+                result.text = f'YOLO: {summary}'
+            else:
+                result.color.r = 0.8
+                result.color.g = 0.8
+                result.color.b = 0.8
+                result.text = 'YOLO: pending'
+            markers.markers.append(result)
 
         if not self._mission_done and self._index < len(self._waypoints):
             current = self._waypoints[self._index]

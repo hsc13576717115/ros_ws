@@ -79,6 +79,36 @@ def generate_launch_description():
         description='Start preset multi-waypoint mission node'
     )
 
+    start_yolo_arg = DeclareLaunchArgument(
+        'start_yolo',
+        default_value='true',
+        description='Start YOLO detection node together with navigation'
+    )
+
+    yolo_show_detection_arg = DeclareLaunchArgument(
+        'yolo_show_detection',
+        default_value='false',
+        description='Show YOLO OpenCV window'
+    )
+
+    yolo_publish_image_arg = DeclareLaunchArgument(
+        'yolo_publish_image',
+        default_value='true',
+        description='Publish YOLO image topic for RViz'
+    )
+
+    yolo_start_enabled_arg = DeclareLaunchArgument(
+        'yolo_start_enabled',
+        default_value='false',
+        description='Whether YOLO inference starts immediately or waits for waypoint trigger'
+    )
+
+    yolo_camera_id_arg = DeclareLaunchArgument(
+        'yolo_camera_id',
+        default_value='0',
+        description='Camera device index used by YOLO detection node'
+    )
+
     waypoint_file_arg = DeclareLaunchArgument(
         'waypoint_file',
         default_value=os.path.join(nav2_config_dir, 'config', 'preset_waypoints.yaml'),
@@ -122,6 +152,24 @@ def generate_launch_description():
             ])
         ]),
         condition=IfCondition(LaunchConfiguration('start_imu'))
+    )
+
+    yolo_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource([
+            PathJoinSubstitution([
+                get_package_share_directory('yolov11n_rknn'),
+                'launch',
+                'yolo_detection.launch.py',
+            ])
+        ]),
+        condition=IfCondition(LaunchConfiguration('start_yolo')),
+        launch_arguments={
+            'show_detection': LaunchConfiguration('yolo_show_detection'),
+            'publish_image': LaunchConfiguration('yolo_publish_image'),
+            'start_enabled': LaunchConfiguration('yolo_start_enabled'),
+            'camera_id': LaunchConfiguration('yolo_camera_id'),
+            'enable_topic': '/yolo/enable',
+        }.items(),
     )
 
     # ============================================================================
@@ -397,11 +445,17 @@ def generate_launch_description():
         imu_pitch_arg,
         imu_yaw_arg,
         start_preset_mission_arg,
+        start_yolo_arg,
+        yolo_show_detection_arg,
+        yolo_publish_image_arg,
+        yolo_start_enabled_arg,
+        yolo_camera_id_arg,
         waypoint_file_arg,
         preset_mission_loop_arg,
         tf_static,
         lidar_driver,
         yesense_launch,
+        yolo_launch,
         cartographer_node,
         occupancy_grid_node,
         controller_server,

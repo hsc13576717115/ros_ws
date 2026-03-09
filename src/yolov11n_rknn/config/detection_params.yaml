@@ -60,6 +60,13 @@ yolo_detection_node:
     #   - 1 通常对应 /dev/video1
     #   - 使用 v4l2-ctl 查看可用设备: v4l2-ctl --list-devices
     camera_id: 0
+
+    # 是否在节点启动后立即开始识别
+    #   - 设为 false 时，可通过 /yolo/enable 话题在任务点按需开启识别
+    start_enabled: true
+
+    # 运行时启停识别控制话题
+    enable_topic: "/yolo/enable"
     #
     # 摄像头采集配置（硬编码在源码中）:
     #   - 分辨率: 640x480 (摄像头原生分辨率)

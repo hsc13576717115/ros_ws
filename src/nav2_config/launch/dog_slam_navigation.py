@@ -74,6 +74,36 @@ def generate_launch_description():
         description='Start preset multi-waypoint mission node'
     )
 
+    start_yolo_arg = DeclareLaunchArgument(
+        'start_yolo',
+        default_value='true',
+        description='Start YOLO detection node together with navigation'
+    )
+
+    yolo_show_detection_arg = DeclareLaunchArgument(
+        'yolo_show_detection',
+        default_value='false',
+        description='Show YOLO OpenCV window'
+    )
+
+    yolo_publish_image_arg = DeclareLaunchArgument(
+        'yolo_publish_image',
+        default_value='true',
+        description='Publish YOLO image topic for RViz'
+    )
+
+    yolo_start_enabled_arg = DeclareLaunchArgument(
+        'yolo_start_enabled',
+        default_value='false',
+        description='Whether YOLO inference starts immediately or waits for waypoint trigger'
+    )
+
+    yolo_camera_id_arg = DeclareLaunchArgument(
+        'yolo_camera_id',
+        default_value='0',
+        description='Camera device index used by YOLO detection node'
+    )
+
     waypoint_file_arg = DeclareLaunchArgument(
         'waypoint_file',
         default_value=os.path.join(nav2_config_dir, 'config', 'preset_waypoints.yaml'),
@@ -96,6 +126,11 @@ def generate_launch_description():
         imu_pitch_arg,
         imu_yaw_arg,
         start_preset_mission_arg,
+        start_yolo_arg,
+        yolo_show_detection_arg,
+        yolo_publish_image_arg,
+        yolo_start_enabled_arg,
+        yolo_camera_id_arg,
         waypoint_file_arg,
         preset_mission_loop_arg,
         IncludeLaunchDescription(
@@ -112,6 +147,11 @@ def generate_launch_description():
                 'imu_pitch_deg': LaunchConfiguration('imu_pitch_deg'),
                 'imu_yaw_deg': LaunchConfiguration('imu_yaw_deg'),
                 'start_preset_mission': LaunchConfiguration('start_preset_mission'),
+                'start_yolo': LaunchConfiguration('start_yolo'),
+                'yolo_show_detection': LaunchConfiguration('yolo_show_detection'),
+                'yolo_publish_image': LaunchConfiguration('yolo_publish_image'),
+                'yolo_start_enabled': LaunchConfiguration('yolo_start_enabled'),
+                'yolo_camera_id': LaunchConfiguration('yolo_camera_id'),
                 'waypoint_file': LaunchConfiguration('waypoint_file'),
                 'preset_mission_loop': LaunchConfiguration('preset_mission_loop'),
             }.items(),

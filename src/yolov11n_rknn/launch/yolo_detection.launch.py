@@ -82,6 +82,18 @@ def generate_launch_description():
         description='Camera device ID (usually 0 for /dev/video0)'
     )
 
+    start_enabled_arg = DeclareLaunchArgument(
+        'start_enabled',
+        default_value='true',
+        description='Whether to start YOLO inference immediately'
+    )
+
+    enable_topic_arg = DeclareLaunchArgument(
+        'enable_topic',
+        default_value='/yolo/enable',
+        description='Topic used to enable or disable YOLO inference at runtime'
+    )
+
     # ---------------------------------------------------------------------
     # YOLO 检测节点
     # ---------------------------------------------------------------------
@@ -99,6 +111,8 @@ def generate_launch_description():
             'show_detection': LaunchConfiguration('show_detection'),
             'publish_image': LaunchConfiguration('publish_image'),
             'camera_id': LaunchConfiguration('camera_id'),
+            'start_enabled': LaunchConfiguration('start_enabled'),
+            'enable_topic': LaunchConfiguration('enable_topic'),
         }]
     )
 
@@ -115,6 +129,8 @@ def generate_launch_description():
         show_detection_arg,
         publish_image_arg,
         camera_id_arg,
+        start_enabled_arg,
+        enable_topic_arg,
         # 节点
         yolo_detection_node,
     ])

@@ -21,12 +21,14 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/image.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "vision_msgs/msg/detection2_d_array.hpp"
 #include "vision_msgs/msg/object_hypothesis_with_pose.hpp"
 #include "cv_bridge/cv_bridge.h"
 #include "yolov11n_rknn/yolo_detector.hpp"
 #include "ament_index_cpp/get_package_share_directory.hpp"
 #include <opencv2/opencv.hpp>
+#include <functional>
 #include <memory>
 #include <string>
 #include <chrono>
@@ -62,6 +64,8 @@ public:
         declare_parameter("camera_id", 0);
         declare_parameter("num_classes", 1);
         declare_parameter("class_names", std::vector<std::string>{"ball"});
+        declare_parameter("start_enabled", true);
+        declare_parameter("enable_topic", std::string("/yolo/enable"));
 
         // 获取参数
         auto config = get_config_from_params();
@@ -83,6 +87,10 @@ public:
             image_pub_ = create_publisher<sensor_msgs::msg::Image>(
                 "/yolo/detection_image", 10);
         }
+
+        enable_sub_ = create_subscription<std_msgs::msg::Bool>(
+            enable_topic_, 10,
+            std::bind(&YoloDetectionNode::enable_callback, this, std::placeholders::_1));
 
         // 打开摄像头
         if (!open_camera()) {
@@ -134,6 +142,8 @@ private:
         show_detection_ = get_parameter("show_detection").as_bool();
         publish_image_ = get_parameter("publish_image").as_bool();
         camera_id_ = get_parameter("camera_id").as_int();
+        detection_enabled_ = get_parameter("start_enabled").as_bool();
+        enable_topic_ = get_parameter("enable_topic").as_string();
 
         // 设置输入尺寸（固定为 640x640）
         config.input_width = 640;
@@ -184,6 +194,8 @@ private:
         RCLCPP_INFO(get_logger(), "NMS threshold: %.2f", config.nms_threshold);
         RCLCPP_INFO(get_logger(), "Show detection: %s", show_detection_ ? "YES" : "NO");
         RCLCPP_INFO(get_logger(), "Publish image: %s", publish_image_ ? "YES" : "NO");
+        RCLCPP_INFO(get_logger(), "Start enabled: %s", detection_enabled_ ? "YES" : "NO");
+        RCLCPP_INFO(get_logger(), "Enable topic: %s", enable_topic_.c_str());
         RCLCPP_INFO(get_logger(), "=====================================");
 
         // 打印无显示模式提示
@@ -212,8 +224,10 @@ private:
         // 更新FPS统计
         update_fps();
 
-        // 运行检测
-        std::vector<DetectBox> detections = detector_->detect(frame);
+        std::vector<DetectBox> detections;
+        if (detection_enabled_) {
+            detections = detector_->detect(frame);
+        }
         last_detection_count_ = detections.size();
 
         // 发布检测结果
@@ -243,7 +257,7 @@ private:
             last_fps_time_ = current_time;
 
             // 如果没有显示窗口，在终端输出性能信息
-            if (!show_detection_) {
+            if (!show_detection_ && detection_enabled_) {
                 float capture_time = last_capture_time_ms_;
                 float preprocess_time = detector_->get_last_preprocess_time_ms();
                 float inference_time = detector_->get_last_inference_time_ms();
@@ -254,8 +268,24 @@ private:
                             "FPS: %d | Cap: %.1fms | Pre: %.1fms | Inf: %.1fms | Post: %.1fms | Detect: %.1fms | Det: %zu",
                             current_fps_, capture_time, preprocess_time, inference_time, postprocess_time, total_time,
                             last_detection_count_);
+            } else if (!show_detection_) {
+                RCLCPP_INFO(get_logger(),
+                            "FPS: %d | Cap: %.1fms | Detect: DISABLED",
+                            current_fps_, last_capture_time_ms_);
             }
         }
+    }
+
+    void enable_callback(const std_msgs::msg::Bool::SharedPtr msg) {
+        if (msg == nullptr || detection_enabled_ == msg->data) {
+            return;
+        }
+
+        detection_enabled_ = msg->data;
+        RCLCPP_INFO(
+            get_logger(),
+            "YOLO detection %s by external control.",
+            detection_enabled_ ? "enabled" : "disabled");
     }
 
     /**
@@ -304,12 +334,16 @@ private:
             msg.detections.push_back(det_msg);
         }
 
-        detection_pub_->publish(msg);
+        if (detection_enabled_) {
+            detection_pub_->publish(msg);
+        }
 
-        // 可选：发布检测图像
-        if (publish_image_ && !detections.empty()) {
+        // 可选：持续发布图像，便于 RViz 同时看导航和相机画面
+        if (publish_image_) {
             cv::Mat display = frame.clone();
-            draw_detections(display, detections);
+            if (!detections.empty()) {
+                draw_detections(display, detections);
+            }
             publish_detection_image(display, msg.header);
         }
     }
@@ -400,6 +434,7 @@ private:
     // ROS2 组件
     rclcpp::Publisher<vision_msgs::msg::Detection2DArray>::SharedPtr detection_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr enable_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
 
     // 核心组件
@@ -409,7 +444,9 @@ private:
     // 配置参数
     bool show_detection_;
     bool publish_image_;
+    bool detection_enabled_;
     int camera_id_;
+    std::string enable_topic_;
 
     // FPS统计
     int frame_count_;

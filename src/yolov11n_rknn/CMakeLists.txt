@@ -16,6 +16,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(vision_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(ament_index_cpp REQUIRED)  # 用于获取包路径
@@ -46,6 +47,7 @@ add_executable(yolo_detection_node
 ament_target_dependencies(yolo_detection_node
   rclcpp
   sensor_msgs
+  std_msgs
   vision_msgs
   cv_bridge
   ament_index_cpp
