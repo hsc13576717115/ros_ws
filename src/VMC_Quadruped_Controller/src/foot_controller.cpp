@@ -1,5 +1,15 @@
 #include "foot_controller.h"
 
+#include "r2_arm_control/msg/arm_cartesian_target.hpp"
+#include "r2_arm_control/msg/arm_motion_state.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <string>
+
+#include "std_msgs/msg/bool.hpp"
+
 class Foot_Controller : public rclcpp::Node{
     private:
         float step_length = 0.4;
@@ -9,17 +19,45 @@ class Foot_Controller : public rclcpp::Node{
         rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_subscription;
         rclcpp::Subscription<vmc_quadruped_controller::msg::MoveCmd>::SharedPtr move_cmd_subscription;
         rclcpp::Subscription<yesense_interface::msg::EulerOnly>::SharedPtr euler_subscription;
+        rclcpp::Subscription<r2_arm_control::msg::ArmMotionState>::SharedPtr arm_state_subscription;
+        rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr gpio_state_subscription;
+        rclcpp::Publisher<r2_arm_control::msg::ArmCartesianTarget>::SharedPtr arm_target_publisher;
+        rclcpp::TimerBase::SharedPtr arm_control_timer;
+        rclcpp::TimerBase::SharedPtr status_line_timer;
         bool stand_up_flag = false;
         bool ctrl_by_joy = true;
         const float joy_deadzone = 0.10;
         const double joy_override_timeout_sec = 0.25;
         const double auto_cmd_timeout_sec = 0.50;
+        const double arm_control_period_sec = 0.02;
+        const double arm_stick_deadzone = 0.10;
+        const double arm_target_vel_x = 0.25;
+        const double arm_target_vel_z = 0.25;
+        const double arm_target_default_x = 0.30;
+        const double arm_target_default_z = 0.30;
+        const double arm_target_min_x = -0.35;
+        const double arm_target_max_x = 0.45;
+        const double arm_target_min_z = 0.05;
+        const double arm_target_max_z = 0.55;
         bool manual_pause_latched = false;
         bool prev_stand_btn = false;
         bool prev_sit_btn = false;
         std::chrono::steady_clock::time_point last_joy_motion_time;
         std::chrono::steady_clock::time_point last_auto_cmd_time;
+        std::chrono::steady_clock::time_point last_arm_control_time;
         bool use_imu_pitch = false;
+        double arm_stick_x = 0.0;
+        double arm_stick_z = 0.0;
+        double arm_target_x = 0.30;
+        double arm_target_z = 0.30;
+        double arm_current_x = 0.30;
+        double arm_current_z = 0.30;
+        double arm_report_target_x = 0.30;
+        double arm_report_target_z = 0.30;
+        bool arm_state_received = false;
+        bool arm_target_initialized = false;
+        bool gpio_state = false;
+        bool gpio_state_received = false;
         float init_pos[4][2]
             ,leg_pos[4][2] // leg_pos {x,y}
             ,period = NORMAL_GAIT_PERIOD
@@ -38,6 +76,17 @@ class Foot_Controller : public rclcpp::Node{
         joy_subscription = this->create_subscription<sensor_msgs::msg::Joy>("joy",10,std::bind(&Foot_Controller::joy_callback,this,std::placeholders::_1));
         move_cmd_subscription = this->create_subscription<vmc_quadruped_controller::msg::MoveCmd>("move_cmd",10,std::bind(&Foot_Controller::move_cmd_callback,this,std::placeholders::_1));
         euler_subscription = this->create_subscription<yesense_interface::msg::EulerOnly>("euler_only",10,std::bind(&Foot_Controller::euler_callback,this,std::placeholders::_1));
+        arm_state_subscription = this->create_subscription<r2_arm_control::msg::ArmMotionState>(
+            "/r2/arm/state", 10, std::bind(&Foot_Controller::arm_state_callback, this, std::placeholders::_1));
+        gpio_state_subscription = this->create_subscription<std_msgs::msg::Bool>(
+            "/r2/manual/dpad_down_gpio36_state", 10, std::bind(&Foot_Controller::gpio_state_callback, this, std::placeholders::_1));
+        arm_target_publisher = this->create_publisher<r2_arm_control::msg::ArmCartesianTarget>("/r2/arm/target_xz", 10);
+        arm_control_timer = this->create_wall_timer(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(arm_control_period_sec)),
+            std::bind(&Foot_Controller::arm_control_timer_callback, this));
+        status_line_timer = this->create_wall_timer(
+            std::chrono::milliseconds(100),
+            std::bind(&Foot_Controller::status_line_timer_callback, this));
         cycloid.Length = 0.05;
         cycloid.Height = NORMAL_GAIT_HEIGHT;
         cycloid.FlightPercent = NORMAL_GAIT_FLIGHT_PERCENT;
@@ -56,6 +105,7 @@ class Foot_Controller : public rclcpp::Node{
         //     params[3].kd_y = INIT_KD_Y_LEG3; // 2号腿输出力矩不足，软件解决
             last_joy_motion_time = std::chrono::steady_clock::time_point::min();
             last_auto_cmd_time = std::chrono::steady_clock::time_point::min();
+            last_arm_control_time = std::chrono::steady_clock::time_point::min();
             std::thread leg0(&Foot_Controller::control_leg,this,0);
             std::thread leg1(&Foot_Controller::control_leg,this,1);
             std::thread leg2(&Foot_Controller::control_leg,this,2);
@@ -79,17 +129,95 @@ class Foot_Controller : public rclcpp::Node{
         return std::chrono::duration<double>(
             std::chrono::steady_clock::now() - last_auto_cmd_time).count() < auto_cmd_timeout_sec;
     }
+    private: bool is_arm_stick_active() const{
+        return std::abs(arm_stick_x) > arm_stick_deadzone || std::abs(arm_stick_z) > arm_stick_deadzone;
+    }
+    private: double clamp_arm_x(double x) const{
+        return std::clamp(x, arm_target_min_x, arm_target_max_x);
+    }
+    private: double clamp_arm_z(double z) const{
+        return std::clamp(z, arm_target_min_z, arm_target_max_z);
+    }
+    private: void publish_arm_target(){
+        r2_arm_control::msg::ArmCartesianTarget arm_target_msg;
+        arm_target_msg.stamp = this->now();
+        arm_target_msg.x = arm_target_x;
+        arm_target_msg.z = arm_target_z;
+        arm_target_publisher->publish(arm_target_msg);
+    }
+    private: void arm_state_callback(const r2_arm_control::msg::ArmMotionState::SharedPtr msg){
+        arm_current_x = msg->current_x;
+        arm_current_z = msg->current_z;
+        arm_report_target_x = msg->target_x;
+        arm_report_target_z = msg->target_z;
+        arm_state_received = true;
+        if(!is_arm_stick_active()){
+            arm_target_x = clamp_arm_x(arm_current_x);
+            arm_target_z = clamp_arm_z(arm_current_z);
+            arm_target_initialized = true;
+        }
+    }
+    private: void gpio_state_callback(const std_msgs::msg::Bool::SharedPtr msg){
+        gpio_state = msg->data;
+        gpio_state_received = true;
+    }
+    private: void status_line_timer_callback(){
+        const char * gpio_label = gpio_state_received ? (gpio_state ? "ON " : "OFF") : "---";
+        if(arm_state_received){
+            std::printf(
+                "\rARM cur(%.3f, %.3f)  target(%.3f, %.3f)  GPIO36:%s",
+                arm_current_x,
+                arm_current_z,
+                arm_report_target_x,
+                arm_report_target_z,
+                gpio_label);
+        }else{
+            std::printf("\rARM cur(--, --)  target(--, --)  GPIO36:%s", gpio_label);
+        }
+        std::fflush(stdout);
+    }
+    private: void arm_control_timer_callback(){
+        auto now_time = std::chrono::steady_clock::now();
+        double dt = arm_control_period_sec;
+        if(last_arm_control_time != std::chrono::steady_clock::time_point::min()){
+            dt = std::chrono::duration<double>(now_time - last_arm_control_time).count();
+        }
+        last_arm_control_time = now_time;
+        dt = std::clamp(dt, 0.001, 0.1);
+
+        if(!arm_target_initialized){
+            if(arm_state_received){
+                arm_target_x = clamp_arm_x(arm_current_x);
+                arm_target_z = clamp_arm_z(arm_current_z);
+            }
+            arm_target_initialized = true;
+        }
+
+        if(!is_arm_stick_active()){
+            if(arm_state_received){
+                arm_target_x = clamp_arm_x(arm_current_x);
+                arm_target_z = clamp_arm_z(arm_current_z);
+            }
+            return;
+        }
+
+        const double filtered_stick_x = std::abs(arm_stick_x) > arm_stick_deadzone ? arm_stick_x : 0.0;
+        const double filtered_stick_z = std::abs(arm_stick_z) > arm_stick_deadzone ? arm_stick_z : 0.0;
+        arm_target_x = clamp_arm_x(arm_target_x + filtered_stick_x * arm_target_vel_x * dt);
+        arm_target_z = clamp_arm_z(arm_target_z + filtered_stick_z * arm_target_vel_z * dt);
+        publish_arm_target();
+    }
     private: void apply_motion_cmd(float cmd_step_x, float cmd_step_y){
         step_x = cmd_step_x;
         step_y = cmd_step_y;
         bool can_run = (abs(step_x) > 0 || abs(step_y) > 0);
         if(stand_up_flag && !running && can_run && !runner_exists){
-            RCLCPP_INFO(this->get_logger(),"start run");
+            RCLCPP_DEBUG(this->get_logger(),"start run");
             std::thread runner(&Foot_Controller::run,this);
             runner.detach();
         }
         else if(running && !can_run){
-            RCLCPP_INFO(this->get_logger(),"end run");
+            RCLCPP_DEBUG(this->get_logger(),"end run");
             running = false;
         }
     }
@@ -114,6 +242,8 @@ class Foot_Controller : public rclcpp::Node{
     }
 
     private: void joy_callback(const sensor_msgs::msg::Joy::SharedPtr msg){
+        arm_stick_x = msg->axes[AXES_RX];
+        arm_stick_z = msg->axes[AXES_RY];
         // // 打印轴和按钮状态
         // RCLCPP_INFO(this->get_logger(), "收到Joy消息:");
         
@@ -139,7 +269,7 @@ class Foot_Controller : public rclcpp::Node{
                 }
             }else{
                 manual_pause_latched = false;
-                RCLCPP_INFO(this->get_logger(),"manual pause released, auto navigation commands enabled");
+                RCLCPP_DEBUG(this->get_logger(),"manual pause released, auto navigation commands enabled");
             }
         }
 
@@ -148,7 +278,7 @@ class Foot_Controller : public rclcpp::Node{
             if(stand_up_flag){
                 sit_down();
             }
-            RCLCPP_INFO(this->get_logger(),"manual emergency pause: stop and crouch");
+            RCLCPP_DEBUG(this->get_logger(),"manual emergency pause: stop and crouch");
         }
 
         prev_stand_btn = stand_btn;
@@ -156,9 +286,9 @@ class Foot_Controller : public rclcpp::Node{
         if(msg->buttons[USE_IMU_PITCH_BTN]){
             use_imu_pitch = !use_imu_pitch;
             if(use_imu_pitch)
-                RCLCPP_INFO(get_logger(),"enable imu pitch");
+                RCLCPP_DEBUG(get_logger(),"enable imu pitch");
             else
-                RCLCPP_INFO(get_logger(),"disable imu pitch");
+                RCLCPP_DEBUG(get_logger(),"disable imu pitch");
         }
         if(msg->buttons[NORMAL_GAIT_BTN]){
             BODY_HEIGHT = NORMAL_GAIT_BODY_HEIGHT;
@@ -171,7 +301,7 @@ class Foot_Controller : public rclcpp::Node{
                     leg_pos[i][0]=0;
                     leg_pos[i][1]=BODY_HEIGHT;
                 }
-            RCLCPP_INFO(this->get_logger(),"switch to normal gait");
+            RCLCPP_DEBUG(this->get_logger(),"switch to normal gait");
         }
         if(msg->buttons[LOWER_GAIT_BTN]){
             BODY_HEIGHT = LOWER_GAIT_BODY_HEIGHT;
@@ -184,7 +314,7 @@ class Foot_Controller : public rclcpp::Node{
                     leg_pos[i][0]=0;
                     leg_pos[i][1]=BODY_HEIGHT;
                 }
-            RCLCPP_INFO(this->get_logger(),"switch to lower gait");
+            RCLCPP_DEBUG(this->get_logger(),"switch to lower gait");
         }
         if(msg->buttons[JUMP_BTN] && stand_up_flag && !running && !runner_exists){
             jump();
@@ -217,13 +347,13 @@ class Foot_Controller : public rclcpp::Node{
         if (msg->axes[2] < -0.5) {
             period = FASTFAST_GAIT_PERIOD;           // 更快步频
             step_length = FAST_GAIT_STEP_LENGTH;      // 更小步长
-            RCLCPP_INFO(this->get_logger(), "Switched to fast-short gait (triggered by LT)");
+            RCLCPP_DEBUG(this->get_logger(), "Switched to fast-short gait (triggered by LT)");
         }
         // RT 恢复步长和速度
         if (msg->axes[5] < -0.5) {
             period = NORMAL_GAIT_PERIOD;
             step_length = 0.4;
-            RCLCPP_INFO(this->get_logger(), "Switched to fast-short gait (triggered by LT)");
+            RCLCPP_DEBUG(this->get_logger(), "Switched to fast-short gait (triggered by LT)");
         }
         // 十字左键修改左边高度降低
         if (msg->axes[6] > 0.5) {
@@ -231,7 +361,7 @@ class Foot_Controller : public rclcpp::Node{
             leg_offset_y[3] -= 0.01;
             leg_pos[2][1] -= 0.01;
             leg_pos[3][1] -= 0.01;
-            RCLCPP_INFO(this->get_logger(), "Leg 2 offset: %.3f, Leg 3 offset: %.3f", leg_offset_y[0], leg_offset_y[1]);
+            RCLCPP_DEBUG(this->get_logger(), "Leg 2 offset: %.3f, Leg 3 offset: %.3f", leg_offset_y[0], leg_offset_y[1]);
         }
         // 十字右键修改右边高度降低
         if (msg->axes[6] < -0.5) {
@@ -239,7 +369,7 @@ class Foot_Controller : public rclcpp::Node{
             leg_offset_y[1] -= 0.01;
             leg_pos[0][1] -= 0.01;
             leg_pos[1][1] -= 0.01;
-            RCLCPP_INFO(this->get_logger(), "Leg 0 offset: %.3f, Leg 1 offset: %.3f", leg_offset_y[0], leg_offset_y[1]);
+            RCLCPP_DEBUG(this->get_logger(), "Leg 0 offset: %.3f, Leg 1 offset: %.3f", leg_offset_y[0], leg_offset_y[1]);
         }
         // 十字上键恢复水平
         if (msg->axes[7] > 0.5) {
@@ -252,7 +382,7 @@ class Foot_Controller : public rclcpp::Node{
         if(msg->buttons[FAST_BIN]){
             period = FAST_GAIT_PERIOD;           // 更快步频
             step_length = FAST_GAIT_STEP_LENGTH;      // 更小步长
-            RCLCPP_INFO(this->get_logger(), "Switched to fast-short gait (triggered by LT)");
+            RCLCPP_DEBUG(this->get_logger(), "Switched to fast-short gait (triggered by LT)");
         }
         if(msg->buttons[10]){
             period = BIG_FAST_GAIT_PERIOD;           // 更快步频
@@ -261,7 +391,7 @@ class Foot_Controller : public rclcpp::Node{
     }
 
     private: void jump_high(){
-        RCLCPP_INFO(this->get_logger(),"start jump");
+        RCLCPP_DEBUG(this->get_logger(),"start jump");
         // ready for jump
         for(int i=0;i<4;i++){
             leg_pos[i][0] = -0.06;
@@ -331,11 +461,11 @@ class Foot_Controller : public rclcpp::Node{
             leg_pos[i][0] = 0;
             leg_pos[i][1] = BODY_HEIGHT;
         }
-        RCLCPP_INFO(this->get_logger(),"end jump");
+        RCLCPP_DEBUG(this->get_logger(),"end jump");
     }
 
     private: void jump(){
-        RCLCPP_INFO(this->get_logger(),"start jump");
+        RCLCPP_DEBUG(this->get_logger(),"start jump");
         // ready for jump
         for(int i=0;i<4;i++){
             leg_pos[i][0] = -0.03;
@@ -381,7 +511,7 @@ class Foot_Controller : public rclcpp::Node{
             params[i].kp_x = INIT_KP_X;
             params[i].kd_x = INIT_KD_X;
         }
-        RCLCPP_INFO(this->get_logger(),"end jump");
+        RCLCPP_DEBUG(this->get_logger(),"end jump");
     }
 
     private: void stand_up(){
@@ -399,7 +529,7 @@ class Foot_Controller : public rclcpp::Node{
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
-        RCLCPP_INFO(this->get_logger(),"stand_up");
+        RCLCPP_DEBUG(this->get_logger(),"stand_up");
     }
 
     private: void sit_down(){
@@ -417,7 +547,7 @@ class Foot_Controller : public rclcpp::Node{
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        RCLCPP_INFO(this->get_logger(),"sit_down");
+        RCLCPP_DEBUG(this->get_logger(),"sit_down");
     }
 
     private: void run(){
@@ -484,7 +614,6 @@ class Foot_Controller : public rclcpp::Node{
             //     }
             // }
             leg_pos[0][0] = res.x;
-            RCLCPP_INFO(this->get_logger(), "Leg 0 offset: %.3f, Leg 1 offset: %.3f", leg_offset_y[0], leg_offset_y[1]);
             leg_pos[0][1] = res.y + leg_offset_y[0];
             // leg_pos[0][1] = res.y;
             res = cycloid.generate(0.75+t);
@@ -608,7 +737,7 @@ class Foot_Controller : public rclcpp::Node{
         float outer_motor_offest = data_outer.q
             ,inner_motor_offest = data_inner.q;
         inited[id] = true;
-        RCLCPP_INFO(this->get_logger(), "inited leg:%d",id);
+        RCLCPP_DEBUG(this->get_logger(), "inited leg:%d",id);
         // init ki
         params[id].start = rclcpp::Clock().now().seconds();
         while(rclcpp::ok()){

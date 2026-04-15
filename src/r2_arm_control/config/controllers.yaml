@@ -1,0 +1,46 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 200
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    arm_position_des_controller:
+      type: forward_command_controller/ForwardCommandController
+
+    arm_velocity_des_controller:
+      type: forward_command_controller/ForwardCommandController
+
+    arm_kp_controller:
+      type: forward_command_controller/ForwardCommandController
+
+    arm_kd_controller:
+      type: forward_command_controller/ForwardCommandController
+
+    arm_feedforward_controller:
+      type: forward_command_controller/ForwardCommandController
+
+arm_position_des_controller:
+  ros__parameters:
+    joints: [shoulder_joint, elbow_joint]
+    interface_name: position_des
+
+arm_velocity_des_controller:
+  ros__parameters:
+    joints: [shoulder_joint, elbow_joint]
+    interface_name: velocity_des
+
+arm_kp_controller:
+  ros__parameters:
+    joints: [shoulder_joint, elbow_joint]
+    interface_name: kp
+
+arm_kd_controller:
+  ros__parameters:
+    joints: [shoulder_joint, elbow_joint]
+    interface_name: kd
+
+arm_feedforward_controller:
+  ros__parameters:
+    joints: [shoulder_joint, elbow_joint]
+    interface_name: feedforward

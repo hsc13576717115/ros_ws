@@ -1,0 +1,10 @@
+<library path="r2_arm_control_dm_hw">
+  <class
+    name="r2_arm_control/DmHW"
+    type="r2_arm_control::DmHW"
+    base_class_type="hardware_interface::SystemInterface">
+    <description>
+      Hardware interface for Damiao motors over serial-CAN.
+    </description>
+  </class>
+</library>

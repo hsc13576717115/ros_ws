@@ -1,0 +1,2 @@
+ACTION=="add", SUBSYSTEM=="gpio", RUN+="/bin/sh -c 'chown orangepi:orangepi /sys/class/gpio/export /sys/class/gpio/unexport; chmod 220 /sys/class/gpio/export /sys/class/gpio/unexport'"
+ACTION=="add", SUBSYSTEM=="gpio", KERNEL=="gpio*", RUN+="/bin/sh -c 'for f in direction value active_low edge; do if [ -e /sys%p/$f ]; then chown orangepi:orangepi /sys%p/$f; chmod 660 /sys%p/$f; fi; done'"

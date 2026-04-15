@@ -1,0 +1,145 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="r2_arm">
+
+  <xacro:arg name="motors_yaml" default="$(find r2_arm_control)/config/motors.yaml"/>
+  <xacro:arg name="arm_yaml" default="$(find r2_arm_control)/config/arm.yaml"/>
+
+  <xacro:property name="motors" value="${xacro.load_yaml('$(arg motors_yaml)')}"/>
+  <xacro:property name="arm" value="${xacro.load_yaml('$(arg arm_yaml)')}"/>
+
+  <xacro:property name="d1" value="${arm['d1']}"/>
+  <xacro:property name="d2" value="${arm['d2']}"/>
+  <xacro:property name="shoulder_motor_sign" value="${arm.get('shoulder_motor_sign', arm.get('joint0_sign', 1.0))}"/>
+  <xacro:property name="elbow_motor_sign" value="${arm.get('elbow_motor_sign', arm.get('joint1_sign', 1.0))}"/>
+  <xacro:property name="shoulder_zero_offset_rad" value="${arm.get('shoulder_zero_offset_rad', 0.0)}"/>
+  <xacro:property name="elbow_zero_offset_rad" value="${arm.get('elbow_zero_offset_rad', 0.0)}"/>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.12 0.12 0.12"/>
+      </geometry>
+      <material name="gray">
+        <color rgba="0.4 0.4 0.4 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <link name="upper_arm_link">
+    <visual>
+      <origin xyz="0 0 ${d1 / 2.0}" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.04 0.04 ${d1}"/>
+      </geometry>
+      <material name="orange">
+        <color rgba="0.9 0.6 0.2 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <link name="forearm_link">
+    <visual>
+      <origin xyz="${d2 / 2.0} 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="${d2} 0.03 0.03"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0.2 0.4 0.9 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <link name="tool_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.02"/>
+      </geometry>
+      <material name="red">
+        <color rgba="0.9 0.1 0.1 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="shoulder_joint" type="revolute">
+    <parent link="base_link"/>
+    <child link="upper_arm_link"/>
+    <origin xyz="0 0 0.06" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit
+      lower="${arm['q1_min']}"
+      upper="${arm['q1_max']}"
+      effort="30.0"
+      velocity="2.0"/>
+  </joint>
+
+  <joint name="elbow_joint" type="revolute">
+    <parent link="upper_arm_link"/>
+    <child link="forearm_link"/>
+    <origin xyz="0 0 ${d1}" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit
+      lower="${arm['q2_min']}"
+      upper="${arm['q2_max']}"
+      effort="30.0"
+      velocity="2.0"/>
+  </joint>
+
+  <joint name="tool_joint" type="fixed">
+    <parent link="forearm_link"/>
+    <child link="tool_link"/>
+    <origin xyz="${d2} 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <ros2_control name="R2ArmSystem" type="system">
+    <hardware>
+      <plugin>r2_arm_control/DmHW</plugin>
+      <param name="feedback_timeout_sec">${arm.get('feedback_timeout_sec', 0.05)}</param>
+      <param name="feedback_hard_timeout_sec">${arm.get('feedback_hard_timeout_sec', 0.30)}</param>
+      <param name="read_error_log_interval_sec">${arm.get('read_error_log_interval_sec', 0.50)}</param>
+      <param name="feedback_status_topic">${arm.get('feedback_status_topic', '/r2/arm/feedback_status')}</param>
+    </hardware>
+
+    <joint name="shoulder_joint">
+      <param name="serial_port">${motors['joint0']['serial_port']}</param>
+      <param name="baud_rate">${motors['joint0']['baud_rate']}</param>
+      <param name="can_id">${motors['joint0']['can_id']}</param>
+      <param name="mst_id">${motors['joint0']['mst_id']}</param>
+      <param name="motor_type">${motors['joint0']['motor_type']}</param>
+      <param name="motor_sign">${shoulder_motor_sign}</param>
+      <param name="zero_offset_rad">${shoulder_zero_offset_rad}</param>
+
+      <command_interface name="position_des"/>
+      <command_interface name="velocity_des"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <command_interface name="feedforward"/>
+
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+
+    <joint name="elbow_joint">
+      <param name="serial_port">${motors['joint1']['serial_port']}</param>
+      <param name="baud_rate">${motors['joint1']['baud_rate']}</param>
+      <param name="can_id">${motors['joint1']['can_id']}</param>
+      <param name="mst_id">${motors['joint1']['mst_id']}</param>
+      <param name="motor_type">${motors['joint1']['motor_type']}</param>
+      <param name="motor_sign">${elbow_motor_sign}</param>
+      <param name="zero_offset_rad">${elbow_zero_offset_rad}</param>
+
+      <command_interface name="position_des"/>
+      <command_interface name="velocity_des"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <command_interface name="feedforward"/>
+
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+  </ros2_control>
+
+</robot>
