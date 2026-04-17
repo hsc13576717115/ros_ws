@@ -30,9 +30,9 @@ class Foot_Controller : public rclcpp::Node{
         const double joy_override_timeout_sec = 0.25;
         const double auto_cmd_timeout_sec = 0.50;
         const double arm_control_period_sec = 0.02;
-        const double arm_stick_deadzone = 0.10;
-        const double arm_target_vel_x = 0.25;
-        const double arm_target_vel_z = 0.25;
+        const double arm_stick_deadzone = 0.05;
+        const double arm_target_vel_x = 0.18;
+        const double arm_target_vel_z = 0.18;
         const double arm_target_default_x = 0.30;
         const double arm_target_default_z = 0.30;
         const double arm_target_min_x = -0.05;
@@ -132,6 +132,16 @@ class Foot_Controller : public rclcpp::Node{
     private: bool is_arm_stick_active() const{
         return std::abs(arm_stick_x) > arm_stick_deadzone || std::abs(arm_stick_z) > arm_stick_deadzone;
     }
+    private: double shape_arm_stick_input(double raw_input) const{
+        const double abs_input = std::abs(raw_input);
+        if(abs_input <= arm_stick_deadzone){
+            return 0.0;
+        }
+
+        const double normalized = (abs_input - arm_stick_deadzone) / (1.0 - arm_stick_deadzone);
+        const double curved = normalized * normalized;
+        return std::copysign(curved, raw_input);
+    }
     private: double clamp_arm_x(double x) const{
         return std::clamp(x, arm_target_min_x, arm_target_max_x);
     }
@@ -151,7 +161,7 @@ class Foot_Controller : public rclcpp::Node{
         arm_report_target_x = msg->target_x;
         arm_report_target_z = msg->target_z;
         arm_state_received = true;
-        if(!is_arm_stick_active()){
+        if(!arm_target_initialized){
             arm_target_x = clamp_arm_x(arm_current_x);
             arm_target_z = clamp_arm_z(arm_current_z);
             arm_target_initialized = true;
@@ -194,17 +204,13 @@ class Foot_Controller : public rclcpp::Node{
         }
 
         if(!is_arm_stick_active()){
-            if(arm_state_received){
-                arm_target_x = clamp_arm_x(arm_current_x);
-                arm_target_z = clamp_arm_z(arm_current_z);
-            }
             return;
         }
 
-        const double filtered_stick_x = std::abs(arm_stick_x) > arm_stick_deadzone ? arm_stick_x : 0.0;
-        const double filtered_stick_z = std::abs(arm_stick_z) > arm_stick_deadzone ? arm_stick_z : 0.0;
-        arm_target_x = clamp_arm_x(arm_target_x + filtered_stick_x * arm_target_vel_x * dt);
-        arm_target_z = clamp_arm_z(arm_target_z + filtered_stick_z * arm_target_vel_z * dt);
+        const double shaped_stick_x = shape_arm_stick_input(arm_stick_x);
+        const double shaped_stick_z = shape_arm_stick_input(arm_stick_z);
+        arm_target_x = clamp_arm_x(arm_target_x + shaped_stick_x * arm_target_vel_x * dt);
+        arm_target_z = clamp_arm_z(arm_target_z + shaped_stick_z * arm_target_vel_z * dt);
         publish_arm_target();
     }
     private: void apply_motion_cmd(float cmd_step_x, float cmd_step_y){

@@ -7,9 +7,19 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(builtin_interfaces REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(hardware_interface REQUIRED)
+find_package(moveit_ros_planning_interface QUIET)
+if(NOT moveit_ros_planning_interface_FOUND AND DEFINED ENV{ROS_DISTRO})
+  set(_r2_moveit_config_dir
+    "/opt/ros/$ENV{ROS_DISTRO}/share/moveit_ros_planning_interface/cmake")
+  if(EXISTS "${_r2_moveit_config_dir}/moveit_ros_planning_interfaceConfig.cmake")
+    set(moveit_ros_planning_interface_DIR "${_r2_moveit_config_dir}")
+    find_package(moveit_ros_planning_interface QUIET)
+  endif()
+endif()
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
@@ -74,14 +84,19 @@ target_include_directories(arm_command_server_node PUBLIC
 )
 ament_target_dependencies(arm_command_server_node
   rclcpp
-  sensor_msgs
-  std_msgs
+  geometry_msgs
 )
 target_link_libraries(arm_command_server_node
   ${PROJECT_NAME}_ik_solver
   ${cpp_typesupport_target}
 )
 add_dependencies(arm_command_server_node ${PROJECT_NAME})
+if(moveit_ros_planning_interface_FOUND)
+  target_compile_definitions(arm_command_server_node PRIVATE R2_ARM_CONTROL_HAS_MOVEIT=1)
+  ament_target_dependencies(arm_command_server_node
+    moveit_ros_planning_interface
+  )
+endif()
 get_target_property(
   arm_command_server_include_directories
   ${cpp_typesupport_target}
@@ -123,6 +138,22 @@ target_link_libraries(arm_pose_test_node
   ${PROJECT_NAME}_ik_solver
 )
 
+add_executable(ee_state_publisher_node
+  src/ee_state_publisher_node.cpp
+)
+target_include_directories(ee_state_publisher_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+ament_target_dependencies(ee_state_publisher_node
+  geometry_msgs
+  rclcpp
+  sensor_msgs
+)
+target_link_libraries(ee_state_publisher_node
+  ${PROJECT_NAME}_ik_solver
+)
+
 pluginlib_export_plugin_description_file(hardware_interface dm_hw_plugins.xml)
 
 install(
@@ -154,6 +185,7 @@ install(
     arm_command_server_node
     ik_commander_node
     arm_pose_test_node
+    ee_state_publisher_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
@@ -170,6 +202,19 @@ if(BUILD_TESTING)
       ${PROJECT_NAME}_ik_solver
     )
     target_include_directories(test_ik_solver PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+      $<INSTALL_INTERFACE:include>
+    )
+  endif()
+
+  ament_add_gtest(test_damiao_limits
+    test/test_damiao_limits.cpp
+  )
+  if(TARGET test_damiao_limits)
+    target_link_libraries(test_damiao_limits
+      ${PROJECT_NAME}_damiao_driver
+    )
+    target_include_directories(test_damiao_limits PUBLIC
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
       $<INSTALL_INTERFACE:include>
     )

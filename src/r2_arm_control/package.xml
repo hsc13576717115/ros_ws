@@ -14,12 +14,14 @@
 
   <depend>ament_index_python</depend>
   <depend>controller_manager</depend>
-  <depend>forward_command_controller</depend>
+  <depend>geometry_msgs</depend>
   <depend>hardware_interface</depend>
   <depend>joint_state_broadcaster</depend>
+  <depend>joint_trajectory_controller</depend>
   <depend>launch</depend>
   <depend>launch_ros</depend>
   <depend>libserial-dev</depend>
+  <depend>moveit_ros_planning_interface</depend>
   <depend>pluginlib</depend>
   <depend>python3-yaml</depend>
   <depend>rclcpp</depend>

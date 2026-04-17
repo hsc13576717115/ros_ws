@@ -148,6 +148,9 @@ hardware_interface::CallbackReturn DmHW::on_init(const hardware_interface::Hardw
     const double motor_sign = sanitizeMotorSign(
       getJointParamOr<double>(joint, "motor_sign", 1.0));
     const double zero_offset_rad = getJointParamOr<double>(joint, "zero_offset_rad", 0.0);
+    const double mit_kp = getJointParamOr<double>(joint, "mit_kp", 0.0);
+    const double mit_kd = getJointParamOr<double>(joint, "mit_kd", 0.0);
+    const double mit_feedforward = getJointParamOr<double>(joint, "mit_feedforward", 0.0);
 
     DmActData data;
     data.name = joint.name;
@@ -156,6 +159,9 @@ hardware_interface::CallbackReturn DmHW::on_init(const hardware_interface::Hardw
     data.motorType = stringToMotorType(motor_type_str);
     data.motor_sign = motor_sign;
     data.zero_offset_rad = zero_offset_rad;
+    data.kp = mit_kp;
+    data.kd = mit_kd;
+    data.cmd_effort = mit_feedforward;
 
     port_to_motors_config_[serial_port][can_id] = data;
     if (port_to_baud_rate.find(serial_port) == port_to_baud_rate.end()) {
@@ -167,8 +173,8 @@ hardware_interface::CallbackReturn DmHW::on_init(const hardware_interface::Hardw
 
     RCLCPP_INFO(
       rclcpp::get_logger("DmHW"),
-      "Joint '%s': motor_sign=%.3f zero_offset_rad=%.6f",
-      joint.name.c_str(), motor_sign, zero_offset_rad);
+      "Joint '%s': motor_sign=%.3f zero_offset_rad=%.6f mit_kp=%.3f mit_kd=%.3f mit_ff=%.3f",
+      joint.name.c_str(), motor_sign, zero_offset_rad, mit_kp, mit_kd, mit_feedforward);
   }
 
   for (auto & pair : port_to_motors_config_) {
@@ -219,15 +225,9 @@ std::vector<hardware_interface::CommandInterface> DmHW::export_command_interface
   std::vector<hardware_interface::CommandInterface> command_interfaces;
   for (size_t i = 0; i < info_.joints.size(); ++i) {
     command_interfaces.emplace_back(
-      hw_actuator_data_[i].name, "position_des", &hw_actuator_data_[i].cmd_pos);
+      hw_actuator_data_[i].name, kR2PrimaryCommandInterface, &hw_actuator_data_[i].cmd_pos);
     command_interfaces.emplace_back(
-      hw_actuator_data_[i].name, "velocity_des", &hw_actuator_data_[i].cmd_vel);
-    command_interfaces.emplace_back(
-      hw_actuator_data_[i].name, "kp", &hw_actuator_data_[i].kp);
-    command_interfaces.emplace_back(
-      hw_actuator_data_[i].name, "kd", &hw_actuator_data_[i].kd);
-    command_interfaces.emplace_back(
-      hw_actuator_data_[i].name, "feedforward", &hw_actuator_data_[i].cmd_effort);
+      hw_actuator_data_[i].name, kR2SecondaryCommandInterface, &hw_actuator_data_[i].cmd_vel);
   }
   return command_interfaces;
 }
@@ -280,6 +280,12 @@ hardware_interface::CallbackReturn DmHW::on_activate(const rclcpp_lifecycle::Sta
         port_name.c_str());
     }
     usleep(300000);
+  }
+
+  read(rclcpp::Time(0, 0, RCL_STEADY_TIME), rclcpp::Duration::from_seconds(0.0));
+  for (auto & actuator : hw_actuator_data_) {
+    actuator.cmd_pos = actuator.pos;
+    actuator.cmd_vel = 0.0;
   }
 
   return hardware_interface::CallbackReturn::SUCCESS;

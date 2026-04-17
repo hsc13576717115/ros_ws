@@ -7,7 +7,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction
 from launch.conditions import IfCondition
-from launch.substitutions import Command, LaunchConfiguration, PythonExpression
+from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 from xml.sax.saxutils import escape
 
@@ -22,6 +22,12 @@ def _build_robot_description(motors: dict, arm: dict) -> str:
     elbow_motor_sign = arm.get("elbow_motor_sign", arm.get("joint1_sign", 1.0))
     shoulder_zero_offset_rad = arm.get("shoulder_zero_offset_rad", 0.0)
     elbow_zero_offset_rad = arm.get("elbow_zero_offset_rad", 0.0)
+    shoulder_mit_kp = arm.get("kp_joint0", 0.0)
+    shoulder_mit_kd = arm.get("kd_joint0", 0.0)
+    shoulder_mit_ff = arm.get("feedforward_joint0", 0.0)
+    elbow_mit_kp = arm.get("kp_joint1", 0.0)
+    elbow_mit_kd = arm.get("kd_joint1", 0.0)
+    elbow_mit_ff = arm.get("feedforward_joint1", 0.0)
 
     return textwrap.dedent(
         f"""\
@@ -37,6 +43,12 @@ def _build_robot_description(motors: dict, arm: dict) -> str:
                 <color rgba="0.4 0.4 0.4 1.0"/>
               </material>
             </visual>
+            <collision>
+              <origin xyz="0 0 0" rpy="0 0 0"/>
+              <geometry>
+                <box size="0.12 0.12 0.12"/>
+              </geometry>
+            </collision>
           </link>
 
           <link name="upper_arm_link">
@@ -49,6 +61,12 @@ def _build_robot_description(motors: dict, arm: dict) -> str:
                 <color rgba="0.9 0.6 0.2 1.0"/>
               </material>
             </visual>
+            <collision>
+              <origin xyz="0 0 {arm['d1'] / 2.0}" rpy="0 0 0"/>
+              <geometry>
+                <box size="0.04 0.04 {arm['d1']}"/>
+              </geometry>
+            </collision>
           </link>
 
           <link name="forearm_link">
@@ -61,6 +79,12 @@ def _build_robot_description(motors: dict, arm: dict) -> str:
                 <color rgba="0.2 0.4 0.9 1.0"/>
               </material>
             </visual>
+            <collision>
+              <origin xyz="{arm['d2'] / 2.0} 0 0" rpy="0 0 0"/>
+              <geometry>
+                <box size="{arm['d2']} 0.03 0.03"/>
+              </geometry>
+            </collision>
           </link>
 
           <link name="tool_link">
@@ -73,6 +97,12 @@ def _build_robot_description(motors: dict, arm: dict) -> str:
                 <color rgba="0.9 0.1 0.1 1.0"/>
               </material>
             </visual>
+            <collision>
+              <origin xyz="0 0 0" rpy="0 0 0"/>
+              <geometry>
+                <sphere radius="0.02"/>
+              </geometry>
+            </collision>
           </link>
 
           <joint name="shoulder_joint" type="revolute">
@@ -114,11 +144,11 @@ def _build_robot_description(motors: dict, arm: dict) -> str:
               <param name="motor_type">{escape(str(motors['joint0']['motor_type']))}</param>
               <param name="motor_sign">{shoulder_motor_sign}</param>
               <param name="zero_offset_rad">{shoulder_zero_offset_rad}</param>
-              <command_interface name="position_des"/>
-              <command_interface name="velocity_des"/>
-              <command_interface name="kp"/>
-              <command_interface name="kd"/>
-              <command_interface name="feedforward"/>
+              <param name="mit_kp">{shoulder_mit_kp}</param>
+              <param name="mit_kd">{shoulder_mit_kd}</param>
+              <param name="mit_feedforward">{shoulder_mit_ff}</param>
+              <command_interface name="position"/>
+              <command_interface name="velocity"/>
               <state_interface name="position"/>
               <state_interface name="velocity"/>
               <state_interface name="effort"/>
@@ -132,11 +162,11 @@ def _build_robot_description(motors: dict, arm: dict) -> str:
               <param name="motor_type">{escape(str(motors['joint1']['motor_type']))}</param>
               <param name="motor_sign">{elbow_motor_sign}</param>
               <param name="zero_offset_rad">{elbow_zero_offset_rad}</param>
-              <command_interface name="position_des"/>
-              <command_interface name="velocity_des"/>
-              <command_interface name="kp"/>
-              <command_interface name="kd"/>
-              <command_interface name="feedforward"/>
+              <param name="mit_kp">{elbow_mit_kp}</param>
+              <param name="mit_kd">{elbow_mit_kd}</param>
+              <param name="mit_feedforward">{elbow_mit_ff}</param>
+              <command_interface name="position"/>
+              <command_interface name="velocity"/>
               <state_interface name="position"/>
               <state_interface name="velocity"/>
               <state_interface name="effort"/>
@@ -185,18 +215,6 @@ def _launch_setup(context, *args, **kwargs):
     robot_description = {"robot_description": robot_description_content}
 
     ros2_control_enabled = IfCondition(LaunchConfiguration("start_ros2_control"))
-    command_server_enabled = IfCondition(
-        PythonExpression(
-            [
-                "'",
-                LaunchConfiguration("start_ros2_control"),
-                "' == 'true' and '",
-                LaunchConfiguration("start_command_server"),
-                "' == 'true'",
-            ]
-        )
-    )
-
     if "joint0_sign" in arm_config and "shoulder_motor_sign" not in arm_config:
         actions.append(
             LogInfo(
@@ -209,6 +227,12 @@ def _launch_setup(context, *args, **kwargs):
                 msg="Deprecated parameter 'joint1_sign' detected. Use 'elbow_motor_sign' instead."
             )
         )
+    actions.append(
+        LogInfo(
+            msg="start_command_server is deprecated in bringup.launch.py. Launch r2_arm_moveit_config/launch/moveit.launch.py for MoveIt service execution.",
+            condition=IfCondition(LaunchConfiguration("start_command_server")),
+        )
+    )
 
     robot_state_publisher_node = Node(
         package="robot_state_publisher",
@@ -233,51 +257,11 @@ def _launch_setup(context, *args, **kwargs):
         output="screen",
     )
 
-    position_spawner = Node(
+    trajectory_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["arm_position_des_controller", "--controller-manager", "/controller_manager"],
+        arguments=["arm_trajectory_controller", "--controller-manager", "/controller_manager"],
         condition=ros2_control_enabled,
-        output="screen",
-    )
-
-    velocity_spawner = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=["arm_velocity_des_controller", "--controller-manager", "/controller_manager"],
-        condition=ros2_control_enabled,
-        output="screen",
-    )
-
-    kp_spawner = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=["arm_kp_controller", "--controller-manager", "/controller_manager"],
-        condition=ros2_control_enabled,
-        output="screen",
-    )
-
-    kd_spawner = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=["arm_kd_controller", "--controller-manager", "/controller_manager"],
-        condition=ros2_control_enabled,
-        output="screen",
-    )
-
-    ff_spawner = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=["arm_feedforward_controller", "--controller-manager", "/controller_manager"],
-        condition=ros2_control_enabled,
-        output="screen",
-    )
-
-    arm_command_server_node = Node(
-        package="r2_arm_control",
-        executable="arm_command_server_node",
-        parameters=[arm_config],
-        condition=command_server_enabled,
         output="screen",
     )
 
@@ -311,12 +295,7 @@ def _launch_setup(context, *args, **kwargs):
             robot_state_publisher_node,
             control_node,
             joint_state_broadcaster_spawner,
-            position_spawner,
-            velocity_spawner,
-            kp_spawner,
-            kd_spawner,
-            ff_spawner,
-            arm_command_server_node,
+            trajectory_spawner,
             arm_pose_test_node,
             rviz_node,
         ]

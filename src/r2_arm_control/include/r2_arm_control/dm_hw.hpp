@@ -20,6 +20,9 @@
 namespace r2_arm_control
 {
 
+inline constexpr const char * kR2PrimaryCommandInterface = "position";
+inline constexpr const char * kR2SecondaryCommandInterface = "velocity";
+
 class DmHW : public hardware_interface::SystemInterface
 {
 public:

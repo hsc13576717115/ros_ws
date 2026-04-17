@@ -14,6 +14,14 @@ bool is_valid_feedback_frame(const CAN_Receive_Frame & frame)
   return frame.CMD == 0x11 && frame.frameEnd == 0x55;
 }
 
+float clampFinite(float value, float lower, float upper, float fallback = 0.0f)
+{
+  if (!std::isfinite(value)) {
+    return fallback;
+  }
+  return std::clamp(value, lower, upper);
+}
+
 }  // namespace
 
 Limit_param limit_param[Num_Of_Motor] = {
@@ -30,6 +38,23 @@ Limit_param limit_param[Num_Of_Motor] = {
   {12.5f, 45.0f, 10.0f},
   {12.5f, 45.0f, 10.0f}
 };
+
+MitCommand sanitizeMitCommandInputs(
+  const Limit_param & limits,
+  float kp,
+  float kd,
+  float q,
+  float dq,
+  float tau)
+{
+  MitCommand command;
+  command.kp = clampFinite(kp, 0.0f, 500.0f);
+  command.kd = clampFinite(kd, 0.0f, 5.0f);
+  command.q = clampFinite(q, -limits.Q_MAX, limits.Q_MAX);
+  command.dq = clampFinite(dq, -limits.DQ_MAX, limits.DQ_MAX);
+  command.tau = clampFinite(tau, -limits.TAU_MAX, limits.TAU_MAX);
+  return command;
+}
 
 Motor::Motor(DM_Motor_Type motor_type, MotorId slave_id, MotorId master_id)
 : master_id_(master_id), slave_id_(slave_id), motor_type_(motor_type)
@@ -262,7 +287,10 @@ void Motor_Control::control_mit(
   static const auto float_to_uint =
     [](float x, float xmin, float xmax, uint8_t bits) -> uint16_t {
       const float span = xmax - xmin;
-      const float data_norm = (x - xmin) / span;
+      if (span <= 0.0f) {
+        return 0;
+      }
+      const float data_norm = std::clamp((x - xmin) / span, 0.0f, 1.0f);
       return static_cast<uint16_t>(data_norm * ((1 << bits) - 1));
     };
 
@@ -271,12 +299,14 @@ void Motor_Control::control_mit(
     throw std::runtime_error("Motor_Control id not found");
   }
 
-  const uint16_t kp_uint = float_to_uint(kp, 0, 500, 12);
-  const uint16_t kd_uint = float_to_uint(kd, 0, 5, 12);
   const Limit_param limits = motor.get_limit_param();
-  const uint16_t q_uint = float_to_uint(q, -limits.Q_MAX, limits.Q_MAX, 16);
-  const uint16_t dq_uint = float_to_uint(dq, -limits.DQ_MAX, limits.DQ_MAX, 12);
-  const uint16_t tau_uint = float_to_uint(tau, -limits.TAU_MAX, limits.TAU_MAX, 12);
+  const MitCommand command = sanitizeMitCommandInputs(limits, kp, kd, q, dq, tau);
+
+  const uint16_t kp_uint = float_to_uint(command.kp, 0, 500, 12);
+  const uint16_t kd_uint = float_to_uint(command.kd, 0, 5, 12);
+  const uint16_t q_uint = float_to_uint(command.q, -limits.Q_MAX, limits.Q_MAX, 16);
+  const uint16_t dq_uint = float_to_uint(command.dq, -limits.DQ_MAX, limits.DQ_MAX, 12);
+  const uint16_t tau_uint = float_to_uint(command.tau, -limits.TAU_MAX, limits.TAU_MAX, 12);
 
   std::array<uint8_t, 8> data_buf {};
   data_buf[0] = (q_uint >> 8) & 0xff;

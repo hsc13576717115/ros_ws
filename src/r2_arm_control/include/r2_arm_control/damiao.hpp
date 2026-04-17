@@ -102,6 +102,23 @@ struct Limit_param
 
 extern Limit_param limit_param[Num_Of_Motor];
 
+struct MitCommand
+{
+  float kp {0.0f};
+  float kd {0.0f};
+  float q {0.0f};
+  float dq {0.0f};
+  float tau {0.0f};
+};
+
+MitCommand sanitizeMitCommandInputs(
+  const Limit_param & limits,
+  float kp,
+  float kd,
+  float q,
+  float dq,
+  float tau);
+
 struct DmActData
 {
   std::string name;
