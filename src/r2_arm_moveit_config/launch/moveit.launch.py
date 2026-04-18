@@ -28,6 +28,8 @@ def _launch_setup(context, *args, **kwargs):
     start_rviz = LaunchConfiguration("start_rviz").perform(context).strip().lower()
     use_sim_time = LaunchConfiguration("use_sim_time")
     arm_config = _load_yaml(LaunchConfiguration("arm_yaml").perform(context))
+    raw_joint_states_topic = arm_config.get("joint_states_topic", "/joint_states")
+    moveit_joint_states_topic = arm_config.get("moveit_joint_states_topic", "/joint_states_moveit")
     start_rviz_enabled = start_rviz in ("1", "true", "yes", "on")
     has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
@@ -67,6 +69,8 @@ def _launch_setup(context, *args, **kwargs):
         "publish_geometry_updates": True,
         "publish_state_updates": True,
         "publish_transforms_updates": True,
+        "planning_scene_monitor_options.joint_state_topic": moveit_joint_states_topic,
+        "planning_scene_monitor_options.wait_for_initial_state_timeout": 15.0,
     }
 
     trajectory_execution_parameters = {
@@ -96,10 +100,25 @@ def _launch_setup(context, *args, **kwargs):
         }.items(),
     )
 
+    joint_state_bridge_node = Node(
+        package="r2_arm_control",
+        executable="joint_state_timestamp_bridge_node",
+        parameters=[
+            {
+                "input_topic": raw_joint_states_topic,
+                "output_topic": moveit_joint_states_topic,
+                "always_restamp": True,
+            },
+            {"use_sim_time": use_sim_time},
+        ],
+        output="screen",
+    )
+
     move_group_node = Node(
         package="moveit_ros_move_group",
         executable="move_group",
         output="screen",
+        remappings=[("/joint_states", moveit_joint_states_topic)],
         parameters=[
             robot_description,
             robot_description_semantic,
@@ -115,6 +134,7 @@ def _launch_setup(context, *args, **kwargs):
     move_to_xz_service_node = Node(
         package="r2_arm_control",
         executable="arm_command_server_node",
+        remappings=[("/joint_states", moveit_joint_states_topic)],
         parameters=[
             arm_config,
             robot_description,
@@ -150,11 +170,13 @@ def _launch_setup(context, *args, **kwargs):
         output="screen",
     )
 
-    delayed_move_to_xz_service_node = TimerAction(period=8.0, actions=[move_to_xz_service_node])
+    delayed_move_group_node = TimerAction(period=8.0, actions=[move_group_node])
+    delayed_move_to_xz_service_node = TimerAction(period=12.0, actions=[move_to_xz_service_node])
 
     actions = [
         control_bringup,
-        move_group_node,
+        joint_state_bridge_node,
+        delayed_move_group_node,
         end_effector_state_node,
         delayed_move_to_xz_service_node,
     ]

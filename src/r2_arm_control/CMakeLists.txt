@@ -154,6 +154,18 @@ target_link_libraries(ee_state_publisher_node
   ${PROJECT_NAME}_ik_solver
 )
 
+add_executable(joint_state_timestamp_bridge_node
+  src/joint_state_timestamp_bridge_node.cpp
+)
+target_include_directories(joint_state_timestamp_bridge_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+ament_target_dependencies(joint_state_timestamp_bridge_node
+  rclcpp
+  sensor_msgs
+)
+
 pluginlib_export_plugin_description_file(hardware_interface dm_hw_plugins.xml)
 
 install(
@@ -186,6 +198,7 @@ install(
     ik_commander_node
     arm_pose_test_node
     ee_state_publisher_node
+    joint_state_timestamp_bridge_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}

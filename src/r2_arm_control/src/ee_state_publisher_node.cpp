@@ -17,6 +17,7 @@ public:
   {
     declare_parameter("d1", 0.30);
     declare_parameter("d2", 0.30);
+    declare_parameter("forearm_mount_offset_rad", 0.0);
     declare_parameter("x_offset", 0.0);
     declare_parameter("z_offset", 0.0);
     declare_parameter("base_frame", "base_link");
@@ -27,6 +28,7 @@ public:
 
     params_.d1 = get_parameter("d1").as_double();
     params_.d2 = get_parameter("d2").as_double();
+    params_.forearm_mount_offset_rad = get_parameter("forearm_mount_offset_rad").as_double();
     x_offset_ = get_parameter("x_offset").as_double();
     z_offset_ = get_parameter("z_offset").as_double();
     base_frame_ = get_parameter("base_frame").as_string();
@@ -80,9 +82,10 @@ private:
       return;
     }
 
-    const double shoulder_phys = r2_arm_control::urdfToPhysical(shoulder_urdf);
-    const double elbow_phys = r2_arm_control::urdfToPhysical(elbow_urdf);
-    const auto fk = solver_.forward(shoulder_phys, elbow_phys);
+    const double shoulder_abs = r2_arm_control::urdfToPhysical(shoulder_urdf);
+    const double elbow_rel = r2_arm_control::urdfToPhysical(elbow_urdf);
+    const double forearm_abs = shoulder_abs + elbow_rel;
+    const auto fk = solver_.forward(shoulder_abs, forearm_abs);
 
     geometry_msgs::msg::PointStamped point_msg;
     point_msg.header = msg->header;

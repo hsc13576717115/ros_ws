@@ -23,7 +23,7 @@ TEST(IkSolverTest, ForwardMatchesZeroPoseExpectation)
   EXPECT_NEAR(fk.z, 0.30, 1e-9);
 }
 
-TEST(IkSolverTest, ForwardMatchesQuarterTurnElbowPose)
+TEST(IkSolverTest, ForwardMatchesQuarterTurnForearmAbsolutePose)
 {
   r2_arm_control::ArmParams params;
   r2_arm_control::IkSolver solver(params);
@@ -34,15 +34,15 @@ TEST(IkSolverTest, ForwardMatchesQuarterTurnElbowPose)
   EXPECT_NEAR(fk.z, 0.0, 1e-9);
 }
 
-TEST(IkSolverTest, ForwardMatchesShoulderMinusNinetyPose)
+TEST(IkSolverTest, ForwardMatchesShoulderPlusNinetyPose)
 {
   r2_arm_control::ArmParams params;
   r2_arm_control::IkSolver solver(params);
 
-  const auto fk = solver.forward(-kHalfPi, 0.0);
+  const auto fk = solver.forward(kHalfPi, 0.0);
 
-  EXPECT_NEAR(fk.x, -0.30, 1e-9);
-  EXPECT_NEAR(fk.z, 0.30, 1e-9);
+  EXPECT_NEAR(fk.x, 0.60, 1e-9);
+  EXPECT_NEAR(fk.z, 0.0, 1e-9);
 }
 
 TEST(IkSolverTest, SolveReturnsExpectedZeroPoseForNominalTarget)
@@ -73,6 +73,24 @@ TEST(IkSolverTest, SolveAndForwardStayConsistent)
   const auto fk = solver.forward(ik.q1, ik.q2);
   EXPECT_NEAR(fk.x, 0.18, 1e-6);
   EXPECT_NEAR(fk.z, 0.36, 1e-6);
+}
+
+TEST(IkSolverTest, SolveAndForwardStayConsistentForNegativeZTarget)
+{
+  r2_arm_control::ArmParams params;
+  params.q1_min = -kPi;
+  params.q1_max = kPi;
+  params.q2_min = -kPi;
+  params.q2_max = kPi;
+
+  r2_arm_control::IkSolver solver(params);
+  const auto ik = solver.solve(0.15, -0.10, true);
+
+  ASSERT_TRUE(ik.success);
+
+  const auto fk = solver.forward(ik.q1, ik.q2);
+  EXPECT_NEAR(fk.x, 0.15, 1e-6);
+  EXPECT_NEAR(fk.z, -0.10, 1e-6);
 }
 
 TEST(IkSolverTest, RejectsUnreachableTarget)

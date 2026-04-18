@@ -103,6 +103,19 @@ double getJointParamOr<double>(
   }
 }
 
+template<>
+std::string getJointParamOr<std::string>(
+  const hardware_interface::ComponentInfo & joint,
+  const std::string & key,
+  const std::string & fallback)
+{
+  const auto it = joint.parameters.find(key);
+  if (it == joint.parameters.end() || it->second.empty()) {
+    return fallback;
+  }
+  return it->second;
+}
+
 }  // namespace
 
 hardware_interface::CallbackReturn DmHW::on_init(const hardware_interface::HardwareInfo & info)
@@ -148,6 +161,9 @@ hardware_interface::CallbackReturn DmHW::on_init(const hardware_interface::Hardw
     const double motor_sign = sanitizeMotorSign(
       getJointParamOr<double>(joint, "motor_sign", 1.0));
     const double zero_offset_rad = getJointParamOr<double>(joint, "zero_offset_rad", 0.0);
+    const double transmission_ratio = getJointParamOr<double>(joint, "transmission_ratio", 1.0);
+    const std::string absolute_reference_joint = getJointParamOr<std::string>(
+      joint, "absolute_reference_joint", "");
     const double mit_kp = getJointParamOr<double>(joint, "mit_kp", 0.0);
     const double mit_kd = getJointParamOr<double>(joint, "mit_kd", 0.0);
     const double mit_feedforward = getJointParamOr<double>(joint, "mit_feedforward", 0.0);
@@ -169,12 +185,16 @@ hardware_interface::CallbackReturn DmHW::on_init(const hardware_interface::Hardw
     }
 
     hw_actuator_data_[i] = data;
-    joint_mappings_[i] = JointAngleMapping {joint.name, motor_sign, zero_offset_rad};
+    joint_mappings_[i] =
+      JointAngleMapping {joint.name, motor_sign, zero_offset_rad, transmission_ratio,
+        absolute_reference_joint};
+    joint_index_by_name_[joint.name] = i;
 
     RCLCPP_INFO(
       rclcpp::get_logger("DmHW"),
-      "Joint '%s': motor_sign=%.3f zero_offset_rad=%.6f mit_kp=%.3f mit_kd=%.3f mit_ff=%.3f",
-      joint.name.c_str(), motor_sign, zero_offset_rad, mit_kp, mit_kd, mit_feedforward);
+      "Joint '%s': motor_sign=%.3f zero_offset_rad=%.6f transmission_ratio=%.6f absolute_reference_joint='%s' mit_kp=%.3f mit_kd=%.3f mit_ff=%.3f",
+      joint.name.c_str(), motor_sign, zero_offset_rad, transmission_ratio,
+      absolute_reference_joint.c_str(), mit_kp, mit_kd, mit_feedforward);
   }
 
   for (auto & pair : port_to_motors_config_) {
@@ -306,6 +326,9 @@ hardware_interface::return_type DmHW::read(const rclcpp::Time &, const rclcpp::D
 {
   static rclcpp::Clock steady_clock(RCL_STEADY_TIME);
   std::size_t stale_motor_count = 0;
+  std::vector<double> raw_physical_pos(hw_actuator_data_.size(), 0.0);
+  std::vector<double> raw_physical_vel(hw_actuator_data_.size(), 0.0);
+  std::vector<double> raw_physical_effort(hw_actuator_data_.size(), 0.0);
 
   for (const auto & [port_name, driver] : motor_controls_) {
     (void)port_name;
@@ -321,9 +344,9 @@ hardware_interface::return_type DmHW::read(const rclcpp::Time &, const rclcpp::D
 
     const DmActData & updated_data = port_to_motors_config_.at(port).at(can_id);
     const auto & mapping = joint_mappings_[i];
-    hw_actuator_data_[i].pos = physicalToUrdf(motorToPhysical(updated_data.pos, mapping));
-    hw_actuator_data_[i].vel = motorToPhysicalScalar(updated_data.vel, mapping);
-    hw_actuator_data_[i].effort = motorToPhysicalScalar(updated_data.effort, mapping);
+    raw_physical_pos[i] = motorToPhysical(updated_data.pos, mapping);
+    raw_physical_vel[i] = motorToPhysicalScalar(updated_data.vel, mapping);
+    raw_physical_effort[i] = motorToPhysicalScalar(updated_data.effort, mapping);
 
     bool motor_is_stale = !updated_data.has_valid_feedback;
     if (updated_data.has_valid_feedback) {
@@ -334,6 +357,24 @@ hardware_interface::return_type DmHW::read(const rclcpp::Time &, const rclcpp::D
     if (motor_is_stale) {
       ++stale_motor_count;
     }
+  }
+
+  for (size_t i = 0; i < hw_actuator_data_.size(); ++i) {
+    const auto & mapping = joint_mappings_[i];
+    double physical_pos = raw_physical_pos[i];
+    double physical_vel = raw_physical_vel[i];
+
+    if (!mapping.absolute_reference_joint_name.empty()) {
+      const auto ref_it = joint_index_by_name_.find(mapping.absolute_reference_joint_name);
+      if (ref_it != joint_index_by_name_.end()) {
+        physical_pos -= raw_physical_pos[ref_it->second];
+        physical_vel -= raw_physical_vel[ref_it->second];
+      }
+    }
+
+    hw_actuator_data_[i].pos = physicalToUrdf(physical_pos);
+    hw_actuator_data_[i].vel = physical_vel;
+    hw_actuator_data_[i].effort = raw_physical_effort[i];
   }
 
   publish_feedback_status(stale_motor_count);
@@ -362,6 +403,14 @@ hardware_interface::return_type DmHW::read(const rclcpp::Time &, const rclcpp::D
 
 hardware_interface::return_type DmHW::write(const rclcpp::Time &, const rclcpp::Duration &)
 {
+  std::vector<double> desired_physical_pos(hw_actuator_data_.size(), 0.0);
+  std::vector<double> desired_physical_vel(hw_actuator_data_.size(), 0.0);
+
+  for (size_t i = 0; i < hw_actuator_data_.size(); ++i) {
+    desired_physical_pos[i] = urdfToPhysical(hw_actuator_data_[i].cmd_pos);
+    desired_physical_vel[i] = hw_actuator_data_[i].cmd_vel;
+  }
+
   for (size_t i = 0; i < hw_actuator_data_.size(); ++i) {
     const auto & joint_info = info_.joints[i];
     const std::string & port = joint_info.parameters.at("serial_port");
@@ -369,8 +418,19 @@ hardware_interface::return_type DmHW::write(const rclcpp::Time &, const rclcpp::
 
     auto & mapped_data = port_to_motors_config_.at(port).at(can_id);
     const auto & mapping = joint_mappings_[i];
-    mapped_data.cmd_pos = physicalToMotor(urdfToPhysical(hw_actuator_data_[i].cmd_pos), mapping);
-    mapped_data.cmd_vel = physicalToMotorScalar(hw_actuator_data_[i].cmd_vel, mapping);
+    double physical_cmd_pos = desired_physical_pos[i];
+    double physical_cmd_vel = desired_physical_vel[i];
+
+    if (!mapping.absolute_reference_joint_name.empty()) {
+      const auto ref_it = joint_index_by_name_.find(mapping.absolute_reference_joint_name);
+      if (ref_it != joint_index_by_name_.end()) {
+        physical_cmd_pos += desired_physical_pos[ref_it->second];
+        physical_cmd_vel += desired_physical_vel[ref_it->second];
+      }
+    }
+
+    mapped_data.cmd_pos = physicalToMotor(physical_cmd_pos, mapping);
+    mapped_data.cmd_vel = physicalToMotorScalar(physical_cmd_vel, mapping);
     mapped_data.kp = hw_actuator_data_[i].kp;
     mapped_data.kd = hw_actuator_data_[i].kd;
     mapped_data.cmd_effort = physicalToMotorScalar(hw_actuator_data_[i].cmd_effort, mapping);

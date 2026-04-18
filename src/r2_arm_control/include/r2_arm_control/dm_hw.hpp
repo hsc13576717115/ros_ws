@@ -50,6 +50,7 @@ private:
   std::unordered_map<std::string, std::unique_ptr<Motor_Control>> motor_controls_;
   std::unordered_map<std::string, std::unordered_map<int, DmActData>> port_to_motors_config_;
   std::vector<JointAngleMapping> joint_mappings_;
+  std::unordered_map<std::string, size_t> joint_index_by_name_;
   rclcpp::Node::SharedPtr feedback_node_;
   rclcpp::Publisher<std_msgs::msg::UInt8MultiArray>::SharedPtr feedback_status_pub_;
   std::string feedback_status_topic_ {"/r2/arm/feedback_status"};

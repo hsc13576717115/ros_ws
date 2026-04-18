@@ -28,6 +28,7 @@ public:
   {
     declare_parameter("d1", 0.30);
     declare_parameter("d2", 0.30);
+    declare_parameter("forearm_mount_offset_rad", 0.0);
     declare_parameter("q1_min", -1.80);
     declare_parameter("q1_max", 1.80);
     declare_parameter("q2_min", -1.80);
@@ -44,6 +45,7 @@ public:
 
     params_.d1 = get_parameter("d1").as_double();
     params_.d2 = get_parameter("d2").as_double();
+    params_.forearm_mount_offset_rad = get_parameter("forearm_mount_offset_rad").as_double();
     params_.q1_min = get_parameter("q1_min").as_double();
     params_.q1_max = get_parameter("q1_max").as_double();
     params_.q2_min = get_parameter("q2_min").as_double();
@@ -67,11 +69,12 @@ public:
         throw std::runtime_error("arm_pose_test_node failed to solve the requested target.");
       }
       q1_urdf_ = r2_arm_control::physicalToUrdf(ik.q1);
-      q2_urdf_ = r2_arm_control::physicalToUrdf(ik.q2);
+      q2_urdf_ = r2_arm_control::physicalToUrdf(
+        r2_arm_control::normalizeAngle(ik.q2 - ik.q1));
       const auto fk = solver_.forward(ik.q1, ik.q2);
       RCLCPP_INFO(
         get_logger(),
-        "Publishing IK pose for target x=%.3f z=%.3f -> q1_phys=%.2f deg q2_phys=%.2f deg | FK x=%.3f z=%.3f",
+        "Publishing IK pose for target x=%.3f z=%.3f -> shoulder_abs=%.2f deg forearm_abs=%.2f deg | FK x=%.3f z=%.3f",
         target_x,
         target_z,
         ik.q1 / kDegToRad,
@@ -82,11 +85,12 @@ public:
       const double q1_phys = q1_phys_deg * kDegToRad;
       const double q2_phys = q2_phys_deg * kDegToRad;
       q1_urdf_ = r2_arm_control::physicalToUrdf(q1_phys);
-      q2_urdf_ = r2_arm_control::physicalToUrdf(q2_phys);
+      q2_urdf_ = r2_arm_control::physicalToUrdf(
+        r2_arm_control::normalizeAngle(q2_phys - q1_phys));
       const auto fk = solver_.forward(q1_phys, q2_phys);
       RCLCPP_INFO(
         get_logger(),
-        "Publishing fixed pose q1_phys=%.2f deg q2_phys=%.2f deg -> FK x=%.3f z=%.3f",
+        "Publishing fixed pose shoulder_abs=%.2f deg forearm_abs=%.2f deg -> FK x=%.3f z=%.3f",
         q1_phys_deg,
         q2_phys_deg,
         fk.x,

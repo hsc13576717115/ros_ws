@@ -11,6 +11,8 @@ struct JointAngleMapping
   std::string joint_name;
   double motor_sign {1.0};
   double zero_offset_rad {0.0};
+  double transmission_ratio {1.0};
+  std::string absolute_reference_joint_name;
 };
 
 inline double sanitizeMotorSign(double configured, double fallback = 1.0)
@@ -31,22 +33,26 @@ inline double urdfToPhysical(double urdf_angle_rad)
 
 inline double motorToPhysical(double motor_angle_rad, const JointAngleMapping & mapping)
 {
-  return sanitizeMotorSign(mapping.motor_sign) * (motor_angle_rad - mapping.zero_offset_rad);
+  const double ratio = std::fabs(mapping.transmission_ratio) > 1e-9 ? mapping.transmission_ratio : 1.0;
+  return sanitizeMotorSign(mapping.motor_sign) * (motor_angle_rad - mapping.zero_offset_rad) * ratio;
 }
 
 inline double physicalToMotor(double physical_angle_rad, const JointAngleMapping & mapping)
 {
-  return physical_angle_rad / sanitizeMotorSign(mapping.motor_sign) + mapping.zero_offset_rad;
+  const double ratio = std::fabs(mapping.transmission_ratio) > 1e-9 ? mapping.transmission_ratio : 1.0;
+  return physical_angle_rad / (sanitizeMotorSign(mapping.motor_sign) * ratio) + mapping.zero_offset_rad;
 }
 
 inline double motorToPhysicalScalar(double motor_value, const JointAngleMapping & mapping)
 {
-  return sanitizeMotorSign(mapping.motor_sign) * motor_value;
+  const double ratio = std::fabs(mapping.transmission_ratio) > 1e-9 ? mapping.transmission_ratio : 1.0;
+  return sanitizeMotorSign(mapping.motor_sign) * motor_value * ratio;
 }
 
 inline double physicalToMotorScalar(double physical_value, const JointAngleMapping & mapping)
 {
-  return physical_value / sanitizeMotorSign(mapping.motor_sign);
+  const double ratio = std::fabs(mapping.transmission_ratio) > 1e-9 ? mapping.transmission_ratio : 1.0;
+  return physical_value / (sanitizeMotorSign(mapping.motor_sign) * ratio);
 }
 
 inline double normalizeAngle(double angle_rad)

@@ -27,6 +27,7 @@ public:
   {
     declare_parameter("d1", 0.30);
     declare_parameter("d2", 0.30);
+    declare_parameter("forearm_mount_offset_rad", 0.0);
 
     declare_parameter("q1_min", -0.8);
     declare_parameter("q1_max", 1.4);
@@ -46,6 +47,7 @@ public:
 
     params_.d1 = get_parameter("d1").as_double();
     params_.d2 = get_parameter("d2").as_double();
+    params_.forearm_mount_offset_rad = get_parameter("forearm_mount_offset_rad").as_double();
     params_.q1_min = get_parameter("q1_min").as_double();
     params_.q1_max = get_parameter("q1_max").as_double();
     params_.q2_min = get_parameter("q2_min").as_double();
@@ -109,15 +111,25 @@ private:
   {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    bool have_shoulder = false;
+    double shoulder_abs = current_q1_;
+    double elbow_rel = 0.0;
+
     for (size_t i = 0; i < msg->name.size(); ++i) {
       if (msg->name[i] == "shoulder_joint" && i < msg->position.size()) {
-        current_q1_ = r2_arm_control::urdfToPhysical(msg->position[i]);
+        shoulder_abs = r2_arm_control::urdfToPhysical(msg->position[i]);
+        current_q1_ = shoulder_abs;
+        have_shoulder = true;
         have_joint_state_ = true;
       }
       if (msg->name[i] == "elbow_joint" && i < msg->position.size()) {
-        current_q2_ = r2_arm_control::urdfToPhysical(msg->position[i]);
+        elbow_rel = r2_arm_control::urdfToPhysical(msg->position[i]);
         have_joint_state_ = true;
       }
+    }
+
+    if (have_shoulder) {
+      current_q2_ = shoulder_abs + elbow_rel;
     }
   }
 
@@ -176,7 +188,7 @@ private:
 
       std::cout << "Target accepted: input x=" << x_input << ", z=" << z_input
                 << " | shifted x=" << x_real << ", z=" << z_real
-                << " -> q1=" << ik.q1 << ", q2=" << ik.q2
+                << " -> shoulder_abs=" << ik.q1 << ", forearm_abs=" << ik.q2
                 << " | FK check: x=" << fk.x << ", z=" << fk.z << "\n";
     }
   }
@@ -216,7 +228,10 @@ private:
 
     publishArray(
       pos_pub_,
-      {r2_arm_control::physicalToUrdf(cmd_q1), r2_arm_control::physicalToUrdf(cmd_q2)});
+      {
+        r2_arm_control::physicalToUrdf(cmd_q1),
+        r2_arm_control::physicalToUrdf(r2_arm_control::normalizeAngle(cmd_q2 - cmd_q1))
+      });
     publishArray(vel_pub_, {0.0, 0.0});
     publishArray(kp_pub_, {kp0_, kp1_});
     publishArray(kd_pub_, {kd0_, kd1_});

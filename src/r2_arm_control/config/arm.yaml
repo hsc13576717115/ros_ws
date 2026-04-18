@@ -1,5 +1,6 @@
 d1: 0.30
 d2: 0.30
+forearm_mount_offset_rad: 0.0
 q1_min: -3.14
 q1_max:  3.14
 q2_min: -3.14
@@ -15,6 +16,9 @@ shoulder_motor_sign: 1.0
 elbow_motor_sign: -1.0
 shoulder_zero_offset_rad: 0.0
 elbow_zero_offset_rad: 0.0
+shoulder_transmission_ratio: 1.0
+elbow_transmission_ratio: 1.0
+elbow_absolute_reference_joint: "shoulder_joint"
 x_offset: 0.0
 z_offset: 0.0
 joint_vel_limit: 2.0
@@ -38,6 +42,7 @@ moveit_allowed_execution_duration_scaling: 3.0
 moveit_allowed_goal_duration_margin: 2.0
 moveit_allowed_start_tolerance: 0.10
 joint_states_topic: /joint_states
+moveit_joint_states_topic: /joint_states_moveit
 end_effector_point_topic: /r2/arm/end_effector_point
 log_end_effector_state: true
 end_effector_log_interval_ms: 500

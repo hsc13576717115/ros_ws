@@ -29,7 +29,7 @@ bool IkSolver::withinLimits(double q1, double q2) const
 FkResult IkSolver::forward(double q1, double q2) const
 {
   FkResult fk;
-  const double forearm_world = q1 + q2;
+  const double forearm_world = q2 + params_.forearm_mount_offset_rad;
   fk.x = params_.d1 * std::sin(q1) + params_.d2 * std::cos(forearm_world);
   fk.z = params_.d1 * std::cos(q1) - params_.d2 * std::sin(forearm_world);
   return fk;
@@ -71,7 +71,7 @@ IkResult IkSolver::solve(double x, double z, bool elbow_up) const
   const double vx = x - ex;
   const double vz = z - ez;
   const double forearm_world = std::atan2(-vz, vx);
-  const double q2 = normalizeAngle(forearm_world - q1);
+  const double q2 = normalizeAngle(forearm_world - params_.forearm_mount_offset_rad);
 
   if (!withinLimits(q1, q2)) {
     return result;

@@ -1,4 +1,5 @@
 #include "r2_arm_control/ik_solver.hpp"
+#include "r2_arm_control/angle_mapping.hpp"
 #include "r2_arm_control/msg/arm_motion_state.hpp"
 #include "r2_arm_control/srv/move_to_xz.hpp"
 
@@ -139,9 +140,19 @@ private:
   struct JointGoal
   {
     double shoulder {0.0};
-    double elbow {0.0};
+    double forearm {0.0};
     bool used_elbow_up {true};
   };
+
+  static double absoluteToRelativeElbow(double shoulder_abs, double forearm_abs)
+  {
+    return r2_arm_control::normalizeAngle(forearm_abs - shoulder_abs);
+  }
+
+  static double radToDeg(double angle_rad)
+  {
+    return angle_rad * 180.0 / M_PI;
+  }
 
   static double shortestAngularDistance(double from, double to)
   {
@@ -151,13 +162,13 @@ private:
   static double jointGoalDistanceSquared(
     const JointGoal & candidate,
     double reference_shoulder,
-    double reference_elbow)
+    double reference_forearm)
   {
     const double shoulder_error =
       shortestAngularDistance(reference_shoulder, candidate.shoulder);
-    const double elbow_error =
-      shortestAngularDistance(reference_elbow, candidate.elbow);
-    return shoulder_error * shoulder_error + elbow_error * elbow_error;
+    const double forearm_error =
+      shortestAngularDistance(reference_forearm, candidate.forearm);
+    return shoulder_error * shoulder_error + forearm_error * forearm_error;
   }
 
   CartesianPoint currentCartesianLocked() const
@@ -215,10 +226,10 @@ private:
       if (has_last_joint_goal_) {
         const double preferred_distance =
           jointGoalDistanceSquared(
-          preferred_goal, last_goal_shoulder_, last_goal_elbow_);
+          preferred_goal, last_goal_shoulder_, last_goal_forearm_);
         const double alternate_distance =
           jointGoalDistanceSquared(
-          alternate_goal, last_goal_shoulder_, last_goal_elbow_);
+          alternate_goal, last_goal_shoulder_, last_goal_forearm_);
 
         goal = preferred_distance <= alternate_distance ? preferred_goal : alternate_goal;
         message =
@@ -329,7 +340,7 @@ private:
     const bool accepted_target = move_group_->setJointValueTarget(
       std::map<std::string, double> {
         {shoulder_joint_name_, joint_goal.shoulder},
-        {elbow_joint_name_, joint_goal.elbow},
+        {elbow_joint_name_, absoluteToRelativeElbow(joint_goal.shoulder, joint_goal.forearm)},
       });
     if (!accepted_target) {
       response->accepted = false;
@@ -362,13 +373,17 @@ private:
 
     response->accepted = true;
     std::ostringstream oss;
-    oss << "MoveIt planning and execution succeeded. shoulder=" << joint_goal.shoulder
-        << " rad, elbow=" << joint_goal.elbow << " rad, branch="
+    const double elbow_relative =
+      absoluteToRelativeElbow(joint_goal.shoulder, joint_goal.forearm);
+    oss << "MoveIt planning and execution succeeded. shoulder_abs="
+        << radToDeg(joint_goal.shoulder)
+        << " deg, forearm_abs=" << radToDeg(joint_goal.forearm)
+        << " deg, elbow_rel=" << radToDeg(elbow_relative) << " deg, branch="
         << (joint_goal.used_elbow_up ? "elbow_up" : "elbow_down") << ".";
     response->message = oss.str();
     has_last_joint_goal_ = true;
     last_goal_shoulder_ = joint_goal.shoulder;
-    last_goal_elbow_ = joint_goal.elbow;
+    last_goal_forearm_ = joint_goal.forearm;
     publishStateLocked("REACHED", response->message, requested_x, requested_z, true);
 #else
     (void)request;
@@ -405,7 +420,7 @@ private:
   double last_target_z_ {0.0};
   bool has_last_joint_goal_ {false};
   double last_goal_shoulder_ {0.0};
-  double last_goal_elbow_ {0.0};
+  double last_goal_forearm_ {0.0};
   r2_arm_control::ArmParams ik_params_ {};
   r2_arm_control::IkSolver solver_;
 
