@@ -218,6 +218,12 @@ public:
   static void changeMotorLimit(Motor & motor, float p_max, float q_max, float t_max);
 
 private:
+  enum class TransportType
+  {
+    Serial,
+    SocketCan
+  };
+
   struct LatestFeedback
   {
     float q {0.0f};
@@ -271,6 +277,9 @@ private:
   std::unordered_map<MotorId, LatestFeedback> latest_feedback_;
   std::atomic<bool> stop_thread_ {false};
   std::string serial_port_;
+  TransportType transport_type_ {TransportType::Serial};
+  int socket_fd_ {-1};
+  std::string socketcan_interface_name_;
   std::chrono::duration<double> read_error_log_interval_ {0.5};
   std::chrono::steady_clock::time_point last_receive_diag_log_time_ {};
   std::size_t receive_ok_count_ {0};

@@ -1,11 +1,11 @@
-# 电机与串口/CAN 映射表。
+# 电机与板载 SocketCAN 接口/CAN ID 映射表。
 # joint0 对应肩关节，joint1 对应肘关节。
 
 joint0:
-  # 电机所在串口设备。
-  serial_port: /dev/ttyACM0
+  # 历史字段名仍为 serial_port，但这里实际填写的是板载 SocketCAN 接口名。
+  serial_port: can0
 
-  # 串口波特率。需要与 USB-CAN / 串口模块实际配置一致。
+  # 兼容保留字段；板载 SocketCAN 模式下不会按串口方式打开设备。
   baud_rate: 921600
 
   # 电机从机 CAN ID。
@@ -19,10 +19,10 @@ joint0:
   motor_type: DM4340
 
 joint1:
-  # 电机所在串口设备。
-  serial_port: /dev/ttyACM0
+  # 历史字段名仍为 serial_port，但这里实际填写的是板载 SocketCAN 接口名。
+  serial_port: can0
 
-  # 串口波特率。需要与 USB-CAN / 串口模块实际配置一致。
+  # 兼容保留字段；板载 SocketCAN 模式下不会按串口方式打开设备。
   baud_rate: 921600
 
   # 电机从机 CAN ID。

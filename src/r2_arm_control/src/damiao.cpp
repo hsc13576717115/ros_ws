@@ -1,6 +1,14 @@
 #include "r2_arm_control/damiao.hpp"
 
+#include <cerrno>
 #include <iostream>
+#include <linux/can.h>
+#include <linux/can/raw.h>
+#include <net/if.h>
+#include <poll.h>
+#include <sstream>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 namespace r2_arm_control
@@ -20,6 +28,28 @@ float clampFinite(float value, float lower, float upper, float fallback = 0.0f)
     return fallback;
   }
   return std::clamp(value, lower, upper);
+}
+
+bool looksLikeSocketCanInterface(const std::string & port_name)
+{
+  return port_name.rfind("can", 0) == 0;
+}
+
+std::string resolveSocketCanInterfaceName(const std::string & configured_name)
+{
+  if (::if_nametoindex(configured_name.c_str()) != 0U) {
+    return configured_name;
+  }
+
+  const auto dash_pos = configured_name.find('-');
+  if (dash_pos != std::string::npos) {
+    const std::string base_name = configured_name.substr(0, dash_pos);
+    if (::if_nametoindex(base_name.c_str()) != 0U) {
+      return base_name;
+    }
+  }
+
+  return configured_name;
 }
 
 }  // namespace
@@ -124,20 +154,65 @@ Motor_Control::Motor_Control(
   }
 
   try {
-    const LibSerial::BaudRate baud_rate_enum = intToBaudRate(baud_rate);
-    std::cerr << "Configuring serial port " << serial_port_
-              << " with baud rate " << baud_rate << std::endl;
+    if (looksLikeSocketCanInterface(serial_port_)) {
+      transport_type_ = TransportType::SocketCan;
+      socketcan_interface_name_ = resolveSocketCanInterfaceName(serial_port_);
 
-    serial_.Open(serial_port_);
-    serial_.SetBaudRate(baud_rate_enum);
-    serial_.SetFlowControl(LibSerial::FlowControl::FLOW_CONTROL_NONE);
-    serial_.SetParity(LibSerial::Parity::PARITY_NONE);
-    serial_.SetStopBits(LibSerial::StopBits::STOP_BITS_1);
-    serial_.SetCharacterSize(LibSerial::CharacterSize::CHAR_SIZE_8);
-    usleep(1000000);
+      std::cerr << "Configuring SocketCAN interface " << socketcan_interface_name_
+                << " (requested: " << serial_port_ << ")" << std::endl;
+
+      socket_fd_ = ::socket(PF_CAN, SOCK_RAW, CAN_RAW);
+      if (socket_fd_ < 0) {
+        throw std::runtime_error(
+                "Failed to create CAN socket: " + std::string(std::strerror(errno)));
+      }
+
+      struct ifreq ifr {};
+      std::snprintf(ifr.ifr_name, IFNAMSIZ, "%s", socketcan_interface_name_.c_str());
+      if (::ioctl(socket_fd_, SIOCGIFINDEX, &ifr) < 0) {
+        throw std::runtime_error(
+                "Failed to resolve CAN interface '" + socketcan_interface_name_ + "': " +
+                std::string(std::strerror(errno)));
+      }
+
+      const int recv_own_msgs = 0;
+      if (
+        ::setsockopt(
+          socket_fd_, SOL_CAN_RAW, CAN_RAW_RECV_OWN_MSGS, &recv_own_msgs,
+          sizeof(recv_own_msgs)) < 0)
+      {
+        throw std::runtime_error(
+                "Failed to configure CAN socket: " + std::string(std::strerror(errno)));
+      }
+
+      struct sockaddr_can addr {};
+      addr.can_family = AF_CAN;
+      addr.can_ifindex = ifr.ifr_ifindex;
+      if (::bind(socket_fd_, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
+        throw std::runtime_error(
+                "Failed to bind CAN interface '" + socketcan_interface_name_ + "': " +
+                std::string(std::strerror(errno)));
+      }
+    } else {
+      const LibSerial::BaudRate baud_rate_enum = intToBaudRate(baud_rate);
+      std::cerr << "Configuring serial port " << serial_port_
+                << " with baud rate " << baud_rate << std::endl;
+
+      serial_.Open(serial_port_);
+      serial_.SetBaudRate(baud_rate_enum);
+      serial_.SetFlowControl(LibSerial::FlowControl::FLOW_CONTROL_NONE);
+      serial_.SetParity(LibSerial::Parity::PARITY_NONE);
+      serial_.SetStopBits(LibSerial::StopBits::STOP_BITS_1);
+      serial_.SetCharacterSize(LibSerial::CharacterSize::CHAR_SIZE_8);
+      usleep(1000000);
+    }
   } catch (const std::exception & e) {
-    std::cerr << "Failed to initialize serial port " << serial_port_
+    std::cerr << "Failed to initialize motor transport " << serial_port_
               << ". Error: " << e.what() << std::endl;
+    if (socket_fd_ >= 0) {
+      ::close(socket_fd_);
+      socket_fd_ = -1;
+    }
     throw std::runtime_error("Motor_Control initialization failed");
   }
 }
@@ -156,6 +231,12 @@ Motor_Control::~Motor_Control()
   if (serial_.IsOpen()) {
     std::lock_guard<std::mutex> lock(serial_mutex_);
     serial_.Close();
+  }
+
+  if (socket_fd_ >= 0) {
+    std::lock_guard<std::mutex> lock(serial_mutex_);
+    ::close(socket_fd_);
+    socket_fd_ = -1;
   }
 
   std::unordered_map<Motor *, bool> freed;
@@ -732,6 +813,22 @@ void Motor_Control::get_motor_data_thread()
 
 void Motor_Control::WriteData(const can_send_frame & frame)
 {
+  if (transport_type_ == TransportType::SocketCan) {
+    struct can_frame raw_frame {};
+    raw_frame.can_id = frame.canId;
+    raw_frame.len = std::min<uint8_t>(frame.len, CAN_MAX_DLEN);
+    std::copy(frame.data, frame.data + raw_frame.len, raw_frame.data);
+
+    std::lock_guard<std::mutex> lock(serial_mutex_);
+    const auto written = ::write(socket_fd_, &raw_frame, sizeof(raw_frame));
+    if (written != static_cast<ssize_t>(sizeof(raw_frame))) {
+      throw std::runtime_error(
+              "SocketCAN write failed on '" + socketcan_interface_name_ + "': " +
+              std::string(std::strerror(errno)));
+    }
+    return;
+  }
+
   const auto * frame_ptr = reinterpret_cast<const uint8_t *>(&frame);
   const size_t data_size = sizeof(can_send_frame);
   LibSerial::DataBuffer tx_buffer(frame_ptr, frame_ptr + data_size);
@@ -741,6 +838,46 @@ void Motor_Control::WriteData(const can_send_frame & frame)
 
 bool Motor_Control::ReadData(CAN_Receive_Frame & frame, size_t timeout_ms)
 {
+  if (transport_type_ == TransportType::SocketCan) {
+    struct pollfd poll_fd {};
+    poll_fd.fd = socket_fd_;
+    poll_fd.events = POLLIN;
+
+    const int poll_result = ::poll(&poll_fd, 1, static_cast<int>(timeout_ms));
+    if (poll_result == 0) {
+      return false;
+    }
+    if (poll_result < 0) {
+      if (errno != EINTR) {
+        std::cerr << "SocketCAN poll exception: " << std::strerror(errno) << std::endl;
+      }
+      return false;
+    }
+
+    struct can_frame raw_frame {};
+    {
+      std::lock_guard<std::mutex> lock(serial_mutex_);
+      const auto bytes_read = ::read(socket_fd_, &raw_frame, sizeof(raw_frame));
+      if (bytes_read != static_cast<ssize_t>(sizeof(raw_frame))) {
+        if (bytes_read < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+          std::cerr << "SocketCAN read exception: " << std::strerror(errno) << std::endl;
+        }
+        return false;
+      }
+    }
+
+    frame = CAN_Receive_Frame {};
+    frame.FrameHeader = 0xAA;
+    frame.CMD = 0x11;
+    frame.canDataLen = std::min<uint8_t>(raw_frame.len, CAN_MAX_DLEN);
+    frame.canIde = (raw_frame.can_id & CAN_EFF_FLAG) ? 1 : 0;
+    frame.canRtr = (raw_frame.can_id & CAN_RTR_FLAG) ? 1 : 0;
+    frame.canId = raw_frame.can_id & (frame.canIde ? CAN_EFF_MASK : CAN_SFF_MASK);
+    std::copy(raw_frame.data, raw_frame.data + frame.canDataLen, frame.canData);
+    frame.frameEnd = 0x55;
+    return true;
+  }
+
   LibSerial::DataBuffer rx_buffer;
   const size_t bytes_to_read = sizeof(CAN_Receive_Frame);
 
