@@ -346,6 +346,7 @@ hardware_interface::CallbackReturn DmHW::on_activate(const rclcpp_lifecycle::Sta
   activated_at_ = std::chrono::steady_clock::now();
   hard_timeout_active_ = false;
   startup_grace_active_ = feedback_startup_grace_sec_ > 0.0;
+  startup_feedback_ready_ = false;
   read(rclcpp::Time(0, 0, RCL_STEADY_TIME), rclcpp::Duration::from_seconds(0.0));
   for (auto & actuator : hw_actuator_data_) {
     actuator.cmd_pos = actuator.pos;
@@ -449,6 +450,23 @@ hardware_interface::return_type DmHW::read(const rclcpp::Time &, const rclcpp::D
 
   publish_feedback_status(stale_motor_count);
 
+  if (!startup_feedback_ready_ && stale_motor_count == 0) {
+    for (size_t i = 0; i < hw_actuator_data_.size(); ++i) {
+      hw_actuator_data_[i].cmd_pos = hw_actuator_data_[i].pos;
+      hw_actuator_data_[i].cmd_vel = 0.0;
+      filtered_physical_cmd_pos_[i] = urdfToPhysical(hw_actuator_data_[i].pos);
+      filtered_physical_cmd_vel_[i] = 0.0;
+      filtered_physical_cmd_effort_[i] = 0.0;
+      filtered_cmd_kp_[i] = hw_actuator_data_[i].kp;
+      filtered_cmd_kd_[i] = hw_actuator_data_[i].kd;
+    }
+    startup_feedback_ready_ = true;
+    command_filter_initialized_ = true;
+    RCLCPP_INFO(
+      rclcpp::get_logger("DmHW"),
+      "Initial motor feedback is ready. Locking current pose as the startup MIT hold target.");
+  }
+
   std::ostringstream feedback_stream;
   for (size_t i = 0; i < hw_actuator_data_.size(); ++i) {
     if (i > 0) {
@@ -480,7 +498,13 @@ hardware_interface::return_type DmHW::write(const rclcpp::Time &, const rclcpp::
   std::vector<double> desired_kd(hw_actuator_data_.size(), 0.0);
 
   for (size_t i = 0; i < hw_actuator_data_.size(); ++i) {
-    if (hard_timeout_active_) {
+    if (!startup_feedback_ready_) {
+      desired_physical_pos[i] = urdfToPhysical(hw_actuator_data_[i].pos);
+      desired_physical_vel[i] = 0.0;
+      desired_physical_effort[i] = 0.0;
+      desired_kp[i] = 0.0;
+      desired_kd[i] = 0.0;
+    } else if (hard_timeout_active_) {
       hw_actuator_data_[i].cmd_pos = hw_actuator_data_[i].pos;
       hw_actuator_data_[i].cmd_vel = 0.0;
       desired_physical_pos[i] = urdfToPhysical(hw_actuator_data_[i].pos);
@@ -505,7 +529,13 @@ hardware_interface::return_type DmHW::write(const rclcpp::Time &, const rclcpp::
       continue;
     }
 
-    if (hard_timeout_active_) {
+    if (!startup_feedback_ready_) {
+      filtered_physical_cmd_pos_[i] = desired_physical_pos[i];
+      filtered_physical_cmd_vel_[i] = desired_physical_vel[i];
+      filtered_physical_cmd_effort_[i] = 0.0;
+      filtered_cmd_kp_[i] = 0.0;
+      filtered_cmd_kd_[i] = 0.0;
+    } else if (hard_timeout_active_) {
       filtered_physical_cmd_pos_[i] = desired_physical_pos[i];
       filtered_physical_cmd_vel_[i] = desired_physical_vel[i];
       filtered_physical_cmd_effort_[i] = 0.0;

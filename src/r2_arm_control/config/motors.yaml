@@ -5,8 +5,8 @@ joint0:
   # 历史字段名仍为 serial_port，但这里实际填写的是板载 SocketCAN 接口名。
   serial_port: can0
 
-  # 兼容保留字段；板载 SocketCAN 模式下不会按串口方式打开设备。
-  baud_rate: 921600
+  # 兼容保留字段；当前现场使用 can0，CAN 总线速率为 1000000 bps。
+  baud_rate: 1000000
 
   # 电机从机 CAN ID。
   can_id: 1
@@ -22,8 +22,8 @@ joint1:
   # 历史字段名仍为 serial_port，但这里实际填写的是板载 SocketCAN 接口名。
   serial_port: can0
 
-  # 兼容保留字段；板载 SocketCAN 模式下不会按串口方式打开设备。
-  baud_rate: 921600
+  # 兼容保留字段；当前现场使用 can0，CAN 总线速率为 1000000 bps。
+  baud_rate: 1000000
 
   # 电机从机 CAN ID。
   can_id: 2

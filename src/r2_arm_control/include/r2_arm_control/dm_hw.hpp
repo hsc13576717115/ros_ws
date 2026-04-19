@@ -74,6 +74,7 @@ private:
   std::chrono::steady_clock::time_point activated_at_ {};
   bool hard_timeout_active_ {false};
   bool startup_grace_active_ {false};
+  bool startup_feedback_ready_ {false};
   bool command_filter_initialized_ {false};
 };
 
