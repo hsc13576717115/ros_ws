@@ -1,13 +1,35 @@
+# 电机与串口/CAN 映射表。
+# joint0 对应肩关节，joint1 对应肘关节。
+
 joint0:
+  # 电机所在串口设备。
   serial_port: /dev/ttyACM0
+
+  # 串口波特率。需要与 USB-CAN / 串口模块实际配置一致。
   baud_rate: 921600
+
+  # 电机从机 CAN ID。
   can_id: 1
+
+  # 电机主机/主控 ID。
+  # 当前驱动初始化电机对象时会同时记录 slave/master 两个 ID。
   mst_id: 11
+
+  # 电机型号。决定 MIT 限幅范围和解析方式。
   motor_type: DM4340
 
 joint1:
+  # 电机所在串口设备。
   serial_port: /dev/ttyACM0
+
+  # 串口波特率。需要与 USB-CAN / 串口模块实际配置一致。
   baud_rate: 921600
+
+  # 电机从机 CAN ID。
   can_id: 2
+
+  # 电机主机/主控 ID。
   mst_id: 12
+
+  # 电机型号。决定 MIT 限幅范围和解析方式。
   motor_type: DM4340

@@ -132,8 +132,13 @@ def _build_robot_description(motors: dict, arm: dict) -> str:
               <plugin>r2_arm_control/DmHW</plugin>
               <param name="feedback_timeout_sec">{arm.get('feedback_timeout_sec', 0.05)}</param>
               <param name="feedback_hard_timeout_sec">{arm.get('feedback_hard_timeout_sec', 0.30)}</param>
+              <param name="feedback_startup_grace_sec">{arm.get('feedback_startup_grace_sec', 0.0)}</param>
               <param name="read_error_log_interval_sec">{arm.get('read_error_log_interval_sec', 0.50)}</param>
               <param name="feedback_status_topic">{escape(str(arm.get('feedback_status_topic', '/r2/arm/feedback_status')))}</param>
+              <param name="mit_position_command_alpha">{arm.get('mit_position_command_alpha', 1.0)}</param>
+              <param name="mit_velocity_command_alpha">{arm.get('mit_velocity_command_alpha', 1.0)}</param>
+              <param name="mit_effort_command_alpha">{arm.get('mit_effort_command_alpha', 1.0)}</param>
+              <param name="mit_gain_command_alpha">{arm.get('mit_gain_command_alpha', 1.0)}</param>
             </hardware>
 
             <joint name="shoulder_joint">
@@ -149,6 +154,9 @@ def _build_robot_description(motors: dict, arm: dict) -> str:
               <param name="mit_feedforward">{shoulder_mit_ff}</param>
               <command_interface name="position"/>
               <command_interface name="velocity"/>
+              <command_interface name="effort"/>
+              <command_interface name="kp"/>
+              <command_interface name="kd"/>
               <state_interface name="position"/>
               <state_interface name="velocity"/>
               <state_interface name="effort"/>
@@ -167,6 +175,9 @@ def _build_robot_description(motors: dict, arm: dict) -> str:
               <param name="mit_feedforward">{elbow_mit_ff}</param>
               <command_interface name="position"/>
               <command_interface name="velocity"/>
+              <command_interface name="effort"/>
+              <command_interface name="kp"/>
+              <command_interface name="kd"/>
               <state_interface name="position"/>
               <state_interface name="velocity"/>
               <state_interface name="effort"/>
@@ -257,10 +268,10 @@ def _launch_setup(context, *args, **kwargs):
         output="screen",
     )
 
-    trajectory_spawner = Node(
+    mit_controller_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["arm_trajectory_controller", "--controller-manager", "/controller_manager"],
+        arguments=["arm_mit_controller", "--controller-manager", "/controller_manager"],
         condition=ros2_control_enabled,
         output="screen",
     )
@@ -295,7 +306,7 @@ def _launch_setup(context, *args, **kwargs):
             robot_state_publisher_node,
             control_node,
             joint_state_broadcaster_spawner,
-            trajectory_spawner,
+            mit_controller_spawner,
             arm_pose_test_node,
             rviz_node,
         ]

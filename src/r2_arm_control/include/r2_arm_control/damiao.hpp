@@ -270,7 +270,15 @@ private:
   std::mutex latest_feedback_mutex_;
   std::unordered_map<MotorId, LatestFeedback> latest_feedback_;
   std::atomic<bool> stop_thread_ {false};
+  std::string serial_port_;
   std::chrono::duration<double> read_error_log_interval_ {0.5};
+  std::chrono::steady_clock::time_point last_receive_diag_log_time_ {};
+  std::size_t receive_ok_count_ {0};
+  std::size_t receive_timeout_count_ {0};
+  std::size_t receive_invalid_frame_count_ {0};
+  std::size_t receive_unresolved_frame_count_ {0};
+  std::size_t receive_unknown_motor_count_ {0};
+  std::size_t receive_decode_failure_count_ {0};
   std::size_t receive_timeout_ms_ {5};
   can_send_frame send_data_;
   CAN_Receive_Frame receive_data_ {};

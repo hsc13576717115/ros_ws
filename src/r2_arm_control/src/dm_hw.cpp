@@ -1,6 +1,7 @@
 #include "r2_arm_control/dm_hw.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <exception>
 #include <sstream>
 #include <string>
@@ -14,6 +15,18 @@ namespace r2_arm_control
 
 namespace
 {
+
+double blendCommandValue(double previous, double target, double alpha)
+{
+  const double clamped_alpha = std::clamp(alpha, 0.0, 1.0);
+  if (!std::isfinite(previous)) {
+    return target;
+  }
+  if (!std::isfinite(target)) {
+    return previous;
+  }
+  return previous + clamped_alpha * (target - previous);
+}
 
 DM_Motor_Type stringToMotorType(const std::string & type_str)
 {
@@ -137,16 +150,38 @@ hardware_interface::CallbackReturn DmHW::on_init(const hardware_interface::Hardw
     feedback_timeout_sec_,
     getHardwareParamOr<double>(
       info_, "feedback_hard_timeout_sec", feedback_hard_timeout_sec_));
+  feedback_startup_grace_sec_ = std::max(
+    0.0,
+    getHardwareParamOr<double>(
+      info_, "feedback_startup_grace_sec", feedback_startup_grace_sec_));
   read_error_log_interval_sec_ = std::max(
     0.05,
     getHardwareParamOr<double>(
       info_, "read_error_log_interval_sec", read_error_log_interval_sec_));
   feedback_status_topic_ = getHardwareParamOr<std::string>(
     info_, "feedback_status_topic", feedback_status_topic_);
+  mit_position_command_alpha_ = std::clamp(
+    getHardwareParamOr<double>(info_, "mit_position_command_alpha", mit_position_command_alpha_),
+    0.0, 1.0);
+  mit_velocity_command_alpha_ = std::clamp(
+    getHardwareParamOr<double>(info_, "mit_velocity_command_alpha", mit_velocity_command_alpha_),
+    0.0, 1.0);
+  mit_effort_command_alpha_ = std::clamp(
+    getHardwareParamOr<double>(info_, "mit_effort_command_alpha", mit_effort_command_alpha_),
+    0.0, 1.0);
+  mit_gain_command_alpha_ = std::clamp(
+    getHardwareParamOr<double>(info_, "mit_gain_command_alpha", mit_gain_command_alpha_),
+    0.0, 1.0);
 
   feedback_node_ = rclcpp::Node::make_shared("r2_arm_feedback_status_node");
   feedback_status_pub_ = feedback_node_->create_publisher<std_msgs::msg::UInt8MultiArray>(
     feedback_status_topic_, 10);
+
+  filtered_physical_cmd_pos_.assign(info_.joints.size(), 0.0);
+  filtered_physical_cmd_vel_.assign(info_.joints.size(), 0.0);
+  filtered_physical_cmd_effort_.assign(info_.joints.size(), 0.0);
+  filtered_cmd_kp_.assign(info_.joints.size(), 0.0);
+  filtered_cmd_kd_.assign(info_.joints.size(), 0.0);
 
   std::unordered_map<std::string, int> port_to_baud_rate;
 
@@ -248,6 +283,12 @@ std::vector<hardware_interface::CommandInterface> DmHW::export_command_interface
       hw_actuator_data_[i].name, kR2PrimaryCommandInterface, &hw_actuator_data_[i].cmd_pos);
     command_interfaces.emplace_back(
       hw_actuator_data_[i].name, kR2SecondaryCommandInterface, &hw_actuator_data_[i].cmd_vel);
+    command_interfaces.emplace_back(
+      hw_actuator_data_[i].name, kR2EffortCommandInterface, &hw_actuator_data_[i].cmd_effort);
+    command_interfaces.emplace_back(
+      hw_actuator_data_[i].name, kR2KpCommandInterface, &hw_actuator_data_[i].kp);
+    command_interfaces.emplace_back(
+      hw_actuator_data_[i].name, kR2KdCommandInterface, &hw_actuator_data_[i].kd);
   }
   return command_interfaces;
 }
@@ -302,11 +343,22 @@ hardware_interface::CallbackReturn DmHW::on_activate(const rclcpp_lifecycle::Sta
     usleep(300000);
   }
 
+  activated_at_ = std::chrono::steady_clock::now();
+  hard_timeout_active_ = false;
+  startup_grace_active_ = feedback_startup_grace_sec_ > 0.0;
   read(rclcpp::Time(0, 0, RCL_STEADY_TIME), rclcpp::Duration::from_seconds(0.0));
   for (auto & actuator : hw_actuator_data_) {
     actuator.cmd_pos = actuator.pos;
     actuator.cmd_vel = 0.0;
   }
+  for (size_t i = 0; i < hw_actuator_data_.size(); ++i) {
+    filtered_physical_cmd_pos_[i] = urdfToPhysical(hw_actuator_data_[i].pos);
+    filtered_physical_cmd_vel_[i] = 0.0;
+    filtered_physical_cmd_effort_[i] = hw_actuator_data_[i].cmd_effort;
+    filtered_cmd_kp_[i] = hw_actuator_data_[i].kp;
+    filtered_cmd_kd_[i] = hw_actuator_data_[i].kd;
+  }
+  command_filter_initialized_ = true;
 
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -326,6 +378,7 @@ hardware_interface::return_type DmHW::read(const rclcpp::Time &, const rclcpp::D
 {
   static rclcpp::Clock steady_clock(RCL_STEADY_TIME);
   std::size_t stale_motor_count = 0;
+  std::size_t hard_timeout_motor_count = 0;
   std::vector<double> raw_physical_pos(hw_actuator_data_.size(), 0.0);
   std::vector<double> raw_physical_vel(hw_actuator_data_.size(), 0.0);
   std::vector<double> raw_physical_effort(hw_actuator_data_.size(), 0.0);
@@ -336,6 +389,9 @@ hardware_interface::return_type DmHW::read(const rclcpp::Time &, const rclcpp::D
   }
 
   const auto steady_now = std::chrono::steady_clock::now();
+  startup_grace_active_ =
+    feedback_startup_grace_sec_ > 0.0 &&
+    std::chrono::duration<double>(steady_now - activated_at_).count() < feedback_startup_grace_sec_;
 
   for (size_t i = 0; i < hw_actuator_data_.size(); ++i) {
     const auto & joint_info = info_.joints[i];
@@ -349,14 +405,28 @@ hardware_interface::return_type DmHW::read(const rclcpp::Time &, const rclcpp::D
     raw_physical_effort[i] = motorToPhysicalScalar(updated_data.effort, mapping);
 
     bool motor_is_stale = !updated_data.has_valid_feedback;
+    bool motor_hard_timed_out = !updated_data.has_valid_feedback;
     if (updated_data.has_valid_feedback) {
       const double feedback_age_sec =
         std::chrono::duration<double>(steady_now - updated_data.last_valid_feedback_time).count();
       motor_is_stale = feedback_age_sec > feedback_timeout_sec_;
+      motor_hard_timed_out = feedback_age_sec > feedback_hard_timeout_sec_;
     }
     if (motor_is_stale) {
       ++stale_motor_count;
     }
+    if (!startup_grace_active_ && motor_hard_timed_out) {
+      ++hard_timeout_motor_count;
+    }
+  }
+
+  hard_timeout_active_ = hard_timeout_motor_count > 0;
+  if (hard_timeout_active_) {
+    RCLCPP_WARN_THROTTLE(
+      rclcpp::get_logger("DmHW"),
+      steady_clock,
+      1000,
+      "Hard feedback timeout active. Freezing commands at the latest measured pose.");
   }
 
   for (size_t i = 0; i < hw_actuator_data_.size(); ++i) {
@@ -405,11 +475,56 @@ hardware_interface::return_type DmHW::write(const rclcpp::Time &, const rclcpp::
 {
   std::vector<double> desired_physical_pos(hw_actuator_data_.size(), 0.0);
   std::vector<double> desired_physical_vel(hw_actuator_data_.size(), 0.0);
+  std::vector<double> desired_physical_effort(hw_actuator_data_.size(), 0.0);
+  std::vector<double> desired_kp(hw_actuator_data_.size(), 0.0);
+  std::vector<double> desired_kd(hw_actuator_data_.size(), 0.0);
 
   for (size_t i = 0; i < hw_actuator_data_.size(); ++i) {
-    desired_physical_pos[i] = urdfToPhysical(hw_actuator_data_[i].cmd_pos);
-    desired_physical_vel[i] = hw_actuator_data_[i].cmd_vel;
+    if (hard_timeout_active_) {
+      hw_actuator_data_[i].cmd_pos = hw_actuator_data_[i].pos;
+      hw_actuator_data_[i].cmd_vel = 0.0;
+      desired_physical_pos[i] = urdfToPhysical(hw_actuator_data_[i].pos);
+      desired_physical_vel[i] = 0.0;
+      desired_physical_effort[i] = 0.0;
+      desired_kp[i] = hw_actuator_data_[i].kp;
+      desired_kd[i] = hw_actuator_data_[i].kd;
+    } else {
+      desired_physical_pos[i] = urdfToPhysical(hw_actuator_data_[i].cmd_pos);
+      desired_physical_vel[i] = hw_actuator_data_[i].cmd_vel;
+      desired_physical_effort[i] = hw_actuator_data_[i].cmd_effort;
+      desired_kp[i] = hw_actuator_data_[i].kp;
+      desired_kd[i] = hw_actuator_data_[i].kd;
+    }
+
+    if (!command_filter_initialized_) {
+      filtered_physical_cmd_pos_[i] = desired_physical_pos[i];
+      filtered_physical_cmd_vel_[i] = desired_physical_vel[i];
+      filtered_physical_cmd_effort_[i] = desired_physical_effort[i];
+      filtered_cmd_kp_[i] = desired_kp[i];
+      filtered_cmd_kd_[i] = desired_kd[i];
+      continue;
+    }
+
+    if (hard_timeout_active_) {
+      filtered_physical_cmd_pos_[i] = desired_physical_pos[i];
+      filtered_physical_cmd_vel_[i] = desired_physical_vel[i];
+      filtered_physical_cmd_effort_[i] = 0.0;
+      filtered_cmd_kp_[i] = desired_kp[i];
+      filtered_cmd_kd_[i] = desired_kd[i];
+    } else {
+      filtered_physical_cmd_pos_[i] = blendCommandValue(
+        filtered_physical_cmd_pos_[i], desired_physical_pos[i], mit_position_command_alpha_);
+      filtered_physical_cmd_vel_[i] = blendCommandValue(
+        filtered_physical_cmd_vel_[i], desired_physical_vel[i], mit_velocity_command_alpha_);
+      filtered_physical_cmd_effort_[i] = blendCommandValue(
+        filtered_physical_cmd_effort_[i], desired_physical_effort[i], mit_effort_command_alpha_);
+      filtered_cmd_kp_[i] = blendCommandValue(
+        filtered_cmd_kp_[i], desired_kp[i], mit_gain_command_alpha_);
+      filtered_cmd_kd_[i] = blendCommandValue(
+        filtered_cmd_kd_[i], desired_kd[i], mit_gain_command_alpha_);
+    }
   }
+  command_filter_initialized_ = true;
 
   for (size_t i = 0; i < hw_actuator_data_.size(); ++i) {
     const auto & joint_info = info_.joints[i];
@@ -418,22 +533,25 @@ hardware_interface::return_type DmHW::write(const rclcpp::Time &, const rclcpp::
 
     auto & mapped_data = port_to_motors_config_.at(port).at(can_id);
     const auto & mapping = joint_mappings_[i];
-    double physical_cmd_pos = desired_physical_pos[i];
-    double physical_cmd_vel = desired_physical_vel[i];
+    double physical_cmd_pos = filtered_physical_cmd_pos_[i];
+    double physical_cmd_vel = filtered_physical_cmd_vel_[i];
+    double physical_cmd_effort = filtered_physical_cmd_effort_[i];
 
     if (!mapping.absolute_reference_joint_name.empty()) {
       const auto ref_it = joint_index_by_name_.find(mapping.absolute_reference_joint_name);
       if (ref_it != joint_index_by_name_.end()) {
-        physical_cmd_pos += desired_physical_pos[ref_it->second];
-        physical_cmd_vel += desired_physical_vel[ref_it->second];
+        physical_cmd_pos += filtered_physical_cmd_pos_[ref_it->second];
+        physical_cmd_vel += filtered_physical_cmd_vel_[ref_it->second];
       }
     }
 
     mapped_data.cmd_pos = physicalToMotor(physical_cmd_pos, mapping);
     mapped_data.cmd_vel = physicalToMotorScalar(physical_cmd_vel, mapping);
-    mapped_data.kp = hw_actuator_data_[i].kp;
-    mapped_data.kd = hw_actuator_data_[i].kd;
-    mapped_data.cmd_effort = physicalToMotorScalar(hw_actuator_data_[i].cmd_effort, mapping);
+    mapped_data.kp = filtered_cmd_kp_[i];
+    mapped_data.kd = filtered_cmd_kd_[i];
+    mapped_data.cmd_effort = hard_timeout_active_
+      ? 0.0
+      : physicalToMotorScalar(physical_cmd_effort, mapping);
   }
 
   for (const auto & [port_name, driver] : motor_controls_) {
@@ -475,8 +593,10 @@ void DmHW::publish_feedback_status(std::size_t stale_motor_count)
 
   std_msgs::msg::UInt8MultiArray msg;
   msg.data = {
-    static_cast<std::uint8_t>(stale_motor_count == 0 ? 1 : 0),
+    static_cast<std::uint8_t>((stale_motor_count == 0 && !hard_timeout_active_) ? 1 : 0),
     static_cast<std::uint8_t>(std::min<std::size_t>(stale_motor_count, 255)),
+    static_cast<std::uint8_t>(hard_timeout_active_ ? 1 : 0),
+    static_cast<std::uint8_t>(startup_grace_active_ ? 1 : 0),
   };
   feedback_status_pub_->publish(msg);
 }

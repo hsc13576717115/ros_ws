@@ -1,48 +1,324 @@
+# ------------------------------
+# 几何与关节极限
+# ------------------------------
+
+# 上臂长度，单位 m。IK/FK、末端状态发布和目标校验都会用到。
 d1: 0.30
+
+# 前臂长度，单位 m。IK/FK、末端状态发布和目标校验都会用到。
 d2: 0.30
+
+# 前臂安装角补偿，单位 rad。
+# 如果机械安装时前臂相对理想模型有固定偏转，可在这里补偿。
 forearm_mount_offset_rad: 0.0
+
+# 肩关节绝对角度下限，单位 rad。
 q1_min: -3.14
-q1_max:  3.14
+
+# 肩关节绝对角度上限，单位 rad。
+q1_max: 3.14
+
+# 前臂绝对角度下限，单位 rad。
 q2_min: -3.14
-q2_max:  3.14
-kp_joint0: 40.0
-kp_joint1: 40.0
+
+# 前臂绝对角度上限，单位 rad。
+q2_max: 3.14
+
+
+# ------------------------------
+# MIT 原生 5 变量控制参数
+# ------------------------------
+
+# joint0（肩关节）的 MIT 刚度系数 kp。
+# 值越大越“硬”，响应更快，但过大可能振动或啸叫。
+kp_joint0: 60.0
+
+# joint1（肘关节）的 MIT 刚度系数 kp。
+kp_joint1: 60.0
+
+# joint0（肩关节）的 MIT 阻尼系数 kd。
+# 值越大越“粘”，更能抑制过冲，但过大可能动作发闷。
 kd_joint0: 2.0
+
+# joint1（肘关节）的 MIT 阻尼系数 kd。
 kd_joint1: 2.0
+
+# joint0（肩关节）的基础前馈力矩 tau，单位与电机 MIT 接口一致。
+# 常用来抵消部分重力或恒定负载。
 feedforward_joint0: 0.0
+
+# joint1（肘关节）的基础前馈力矩 tau。
 feedforward_joint1: 0.0
+
+# IK 默认优先选择肘上解还是肘下解。
 elbow_up: true
+
+
+# ------------------------------
+# 电机方向、零位和传动比映射
+# ------------------------------
+
+# 肩关节电机方向。通常为 1.0 或 -1.0。
+# 如果正向指令导致关节反向运动，就改这里。
 shoulder_motor_sign: 1.0
+
+# 肘关节电机方向。通常为 1.0 或 -1.0。
 elbow_motor_sign: -1.0
+
+# 肩关节电机零位偏置，单位 rad。
+# 用于把电机原始零点映射到机械臂物理零点。
 shoulder_zero_offset_rad: 0.0
+
+# 肘关节电机零位偏置，单位 rad。
 elbow_zero_offset_rad: 0.0
+
+# 肩关节传动比。
+# 1.0 表示电机角度与物理关节角度一一对应。
 shoulder_transmission_ratio: 1.0
+
+# 肘关节传动比。
 elbow_transmission_ratio: 1.0
+
+# 肘关节采用相对肩关节的绝对参考。
+# 当前配置下，joint_states 中的肘角会按“前臂绝对角 - 肩绝对角”输出。
 elbow_absolute_reference_joint: "shoulder_joint"
+
+
+# ------------------------------
+# 末端坐标系与服务输入偏置
+# ------------------------------
+
+# 服务输入的 x 目标偏置，单位 m。
+# 调 /r2/arm/move_to_xz 时，请求值会先加上这个偏置再做 IK。
 x_offset: 0.0
+
+# 服务输入的 z 目标偏置，单位 m。
 z_offset: 0.0
+
+
+# ------------------------------
+# 执行速度、轨迹与稳定判定
+# ------------------------------
+
+# 关节最大速度估计，单位 rad/s。
+# 用于计算执行时长，不直接作为电机硬限幅。
 joint_vel_limit: 2.0
-feedback_timeout_sec: 0.35
+
+# 关节最大加速度估计，单位 rad/s^2。
+# 用于计算执行时长和平滑程度。
+joint_acc_limit: 2.0
+
+# 单次动作的最短执行时长，单位 s。
+# 太小会导致动作生硬、冲击大。
+min_motion_duration_sec: 0.40
+
+# 单次动作的最长执行时长，单位 s。
+# 太大则动作会显得拖沓。
+max_motion_duration_sec: 4.00
+
+# MIT 轨迹流式下发的采样周期，单位 s。
+# 越小越平滑，但对控制链实时性要求越高。
+trajectory_sample_period_sec: 0.02
+
+# 末端笛卡尔直线轨迹的巡航速度上限，单位 m/s。
+# MIT 原生模式会优先按这个速度让末端接近匀速运动。
+ee_linear_speed_limit: 0.08
+
+# 末端笛卡尔直线轨迹的加速度上限，单位 m/s^2。
+# 值越小，起停越柔和；值越大，更容易快速进入匀速段。
+ee_linear_acc_limit: 0.20
+
+# 关节速度命令平滑系数，范围建议 0~0.8。
+# 越大越平滑，但相位滞后也会更明显。
+joint_velocity_smoothing: 0.35
+
+# 笛卡尔速度映射到关节速度时的雅可比阻尼项。
+# 越大越稳定，但会牺牲一点速度精度。
+jacobian_damping: 0.02
+
+# 硬件层对 MIT 位置命令做一阶平滑的混合系数，范围 0~1。
+# 数值越小越平滑，越大越跟手；1.0 表示完全不做硬件层平滑。
+mit_position_command_alpha: 0.35
+
+# 硬件层对 MIT 速度命令做一阶平滑的混合系数。
+mit_velocity_command_alpha: 0.25
+
+# 硬件层对 MIT 力矩前馈命令做一阶平滑的混合系数。
+mit_effort_command_alpha: 0.20
+
+# 硬件层对 MIT kp/kd 做一阶平滑的混合系数。
+mit_gain_command_alpha: 0.25
+
+# 肩关节在末端越伸展时附加的 kp 增益。
+# 用来让不同位置下的刚度更接近一致。
+# 建议先从小值开始；当前默认给一个保守的增益调度。
+shoulder_kp_extension_gain: 6.0
+
+# 肩关节在末端越伸展时附加的 kd 增益。
+# 末端越伸展时阻尼略增，可以减轻不同姿态下的速度起伏。
+shoulder_kd_extension_gain: 0.4
+
+# 肘关节在末端越伸展时附加的 kp 增益。
+# 肘关节的增益调度通常比肩关节略小一些。
+elbow_kp_extension_gain: 4.0
+
+# 肘关节在末端越伸展时附加的 kd 增益。
+elbow_kd_extension_gain: 0.3
+
+# 肩关节库仑摩擦补偿项。
+# 正负方向会通过 tanh(v/scale) 平滑切换，避免速度突变。
+# 先保守设为 0，待上机观察后再加。
+shoulder_coulomb_friction: 0.0
+
+# 肩关节粘性摩擦补偿项，和速度成正比。
+shoulder_viscous_friction: 0.0
+
+# 肩关节摩擦补偿速度平滑尺度，单位 rad/s。
+shoulder_friction_velocity_scale: 0.05
+
+# 肘关节库仑摩擦补偿项。
+elbow_coulomb_friction: 0.0
+
+# 肘关节粘性摩擦补偿项。
+elbow_viscous_friction: 0.0
+
+# 肘关节摩擦补偿速度平滑尺度，单位 rad/s。
+elbow_friction_velocity_scale: 0.05
+
+# 旧的 trajectory action 模式预留的启动延时，单位 s。
+# 在 mit_native_5var 模式下基本不参与核心控制。
+trajectory_start_delay_sec: 0.05
+
+# 旧的 trajectory action 模式执行超时裕量，单位 s。
+# 在 mit_native_5var 模式下仅保留兼容配置。
+trajectory_execution_timeout_margin_sec: 1.50
+
+# 判定“已到位”的关节误差阈值，单位 rad。
+direct_goal_tolerance_rad: 0.02
+
+# MIT 原生模式进入最终保持段后，等待稳定到目标窗口内的最长时间，单位 s。
+mit_settle_timeout_sec: 0.60
+
+
+# ------------------------------
+# 反馈健康监测
+# ------------------------------
+
+# 反馈软超时阈值，单位 s。
+# 超过这个时间没收到有效反馈，feedback_ok 会变差。
+feedback_timeout_sec: 2.0
+
+# 反馈硬超时阈值，单位 s。
+# 超过这个时间会触发安全保持，命令冻结到当前位姿。
 feedback_hard_timeout_sec: 1.50
+
+# 上电后的反馈宽限期，单位 s。
+# 刚启动时允许短时间内还没有稳定反馈。
 feedback_startup_grace_sec: 8.0
+
+# 读反馈异常日志的节流周期，单位 s。
 read_error_log_interval_sec: 0.50
+
+# 发布反馈健康状态的 topic。
 feedback_status_topic: /r2/arm/feedback_status
+
+# joint_states 被认为“新鲜”的最长时间，单位 s。
+# 超过后服务会拒绝执行新目标。
+joint_state_timeout_sec: 2.0
+
+
+# ------------------------------
+# 服务、状态与坐标系命名
+# ------------------------------
+
+# 末端移动服务名。
 move_service_name: /r2/arm/move_to_xz
+
+# 机械臂状态 topic。
 state_topic: /r2/arm/state
+
+# MoveIt 规划组名称。
 planning_group: arm
+
+# 机械臂基坐标系名称。
 base_frame: base_link
+
+# 末端工具坐标系名称。
 end_effector_link: tool_link
+
+# 执行模式。
+# 推荐保持 mit_native_5var，表示服务直接流式下发 q/dq/tau/kp/kd。
+executor_mode: mit_native_5var
+
+# 旧的 trajectory action 名称。
+# 仅在 direct_joint_trajectory 模式下会真正用到。
+trajectory_controller_action_name: /arm_trajectory_controller/follow_joint_trajectory
+
+
+# ------------------------------
+# MIT 重力补偿项
+# ------------------------------
+
+# 肩关节重力补偿增益。
+# 对 cos(shoulder_abs) 项生效，可先从很小的值开始试。
+shoulder_gravity_comp_gain: 0.0
+
+# 前臂对肩关节造成的重力补偿增益。
+# 对 cos(forearm_abs) 项生效。
+forearm_gravity_comp_gain: 0.0
+
+# 肘关节重力补偿增益。
+# 当前实现对 cos(forearm_abs) 项生效。
+elbow_gravity_comp_gain: 0.0
+
+
+# ------------------------------
+# MoveIt 规划与执行参数
+# ------------------------------
+
+# MoveIt 规划时间上限，单位 s。
 planning_time: 2.0
+
+# MoveIt 规划尝试次数。
 num_planning_attempts: 5
+
+# MoveIt 位置容差，单位 m。
 goal_position_tolerance: 0.005
+
+# MoveIt 姿态容差，单位 rad。
 goal_orientation_tolerance: 3.14159
+
+# MoveIt 最大速度缩放因子，范围通常为 0~1。
 max_velocity_scaling_factor: 0.15
+
+# MoveIt 最大加速度缩放因子，范围通常为 0~1。
 max_acceleration_scaling_factor: 0.05
+
+# MoveIt 轨迹执行允许的时间放大系数。
 moveit_allowed_execution_duration_scaling: 3.0
+
+# MoveIt 轨迹执行允许的额外时间裕量，单位 s。
 moveit_allowed_goal_duration_margin: 2.0
+
+# MoveIt 轨迹执行起点允许误差，单位 rad。
 moveit_allowed_start_tolerance: 0.10
+
+
+# ------------------------------
+# joint_states 与末端观测发布
+# ------------------------------
+
+# 原始 joint_states 订阅 topic。
 joint_states_topic: /joint_states
+
+# 提供给 MoveIt 的 joint_states topic。
 moveit_joint_states_topic: /joint_states_moveit
+
+# 末端点位可视化/观测 topic。
 end_effector_point_topic: /r2/arm/end_effector_point
+
+# 是否周期性打印末端状态日志。
 log_end_effector_state: true
+
+# 末端状态日志打印周期，单位 ms。
 end_effector_log_interval_ms: 500

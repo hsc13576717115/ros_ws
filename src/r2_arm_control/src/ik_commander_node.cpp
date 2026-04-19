@@ -1,9 +1,9 @@
 #include "r2_arm_control/angle_mapping.hpp"
 #include "r2_arm_control/ik_solver.hpp"
+#include "r2_arm_control/msg/mit_joint_command.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
-#include <std_msgs/msg/float64_multi_array.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -65,16 +65,8 @@ public:
 
     solver_ = r2_arm_control::IkSolver(params_);
 
-    pos_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
-      "/arm_position_des_controller/commands", 10);
-    vel_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
-      "/arm_velocity_des_controller/commands", 10);
-    kp_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
-      "/arm_kp_controller/commands", 10);
-    kd_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
-      "/arm_kd_controller/commands", 10);
-    ff_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
-      "/arm_feedforward_controller/commands", 10);
+    mit_pub_ = create_publisher<r2_arm_control::msg::MitJointCommand>(
+      "/arm_mit_controller/commands", 10);
 
     joint_state_sub_ = create_subscription<sensor_msgs::msg::JointState>(
       "/joint_states",
@@ -193,15 +185,6 @@ private:
     }
   }
 
-  void publishArray(
-    const rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr & pub,
-    const std::vector<double> & values)
-  {
-    std_msgs::msg::Float64MultiArray msg;
-    msg.data = values;
-    pub->publish(msg);
-  }
-
   void timerCallback()
   {
     double cmd_q1 = hold_q1_;
@@ -226,16 +209,17 @@ private:
       }
     }
 
-    publishArray(
-      pos_pub_,
-      {
-        r2_arm_control::physicalToUrdf(cmd_q1),
-        r2_arm_control::physicalToUrdf(r2_arm_control::normalizeAngle(cmd_q2 - cmd_q1))
-      });
-    publishArray(vel_pub_, {0.0, 0.0});
-    publishArray(kp_pub_, {kp0_, kp1_});
-    publishArray(kd_pub_, {kd0_, kd1_});
-    publishArray(ff_pub_, {0.0, 0.0});
+    r2_arm_control::msg::MitJointCommand msg;
+    msg.joint_names = {"shoulder_joint", "elbow_joint"};
+    msg.position = {
+      r2_arm_control::physicalToUrdf(cmd_q1),
+      r2_arm_control::physicalToUrdf(r2_arm_control::normalizeAngle(cmd_q2 - cmd_q1))
+    };
+    msg.velocity = {0.0, 0.0};
+    msg.kp = {kp0_, kp1_};
+    msg.kd = {kd0_, kd1_};
+    msg.effort = {0.0, 0.0};
+    mit_pub_->publish(msg);
   }
 
   r2_arm_control::ArmParams params_;
@@ -251,11 +235,7 @@ private:
   double x_offset_ {0.30};
   double z_offset_ {0.30};
 
-  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr pos_pub_;
-  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr vel_pub_;
-  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr kp_pub_;
-  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr kd_pub_;
-  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr ff_pub_;
+  rclcpp::Publisher<r2_arm_control::msg::MitJointCommand>::SharedPtr mit_pub_;
 
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
   rclcpp::TimerBase::SharedPtr timer_;

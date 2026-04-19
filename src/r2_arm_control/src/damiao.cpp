@@ -114,6 +114,7 @@ Motor_Control::Motor_Control(
   std::unordered_map<int, DmActData> * data_ptr,
   double read_error_log_interval_sec)
 : data_ptr_(data_ptr),
+  serial_port_(std::move(serial_port)),
   read_error_log_interval_(std::chrono::duration<double>(std::max(0.05, read_error_log_interval_sec)))
 {
   for (auto it = data_ptr_->begin(); it != data_ptr_->end(); ++it) {
@@ -124,10 +125,10 @@ Motor_Control::Motor_Control(
 
   try {
     const LibSerial::BaudRate baud_rate_enum = intToBaudRate(baud_rate);
-    std::cerr << "Configuring serial port " << serial_port
+    std::cerr << "Configuring serial port " << serial_port_
               << " with baud rate " << baud_rate << std::endl;
 
-    serial_.Open(serial_port);
+    serial_.Open(serial_port_);
     serial_.SetBaudRate(baud_rate_enum);
     serial_.SetFlowControl(LibSerial::FlowControl::FLOW_CONTROL_NONE);
     serial_.SetParity(LibSerial::Parity::PARITY_NONE);
@@ -135,7 +136,7 @@ Motor_Control::Motor_Control(
     serial_.SetCharacterSize(LibSerial::CharacterSize::CHAR_SIZE_8);
     usleep(1000000);
   } catch (const std::exception & e) {
-    std::cerr << "Failed to initialize serial port " << serial_port
+    std::cerr << "Failed to initialize serial port " << serial_port_
               << ". Error: " << e.what() << std::endl;
     throw std::runtime_error("Motor_Control initialization failed");
   }
@@ -647,22 +648,54 @@ void Motor_Control::get_motor_data_thread()
 {
   while (!stop_thread_) {
     try {
+      const auto now_time = std::chrono::steady_clock::now();
+      if (
+        last_receive_diag_log_time_.time_since_epoch().count() != 0 &&
+        (now_time - last_receive_diag_log_time_) >= read_error_log_interval_)
+      {
+        std::cerr
+          << "[RX-DIAG] port=" << serial_port_
+          << " ok=" << receive_ok_count_
+          << " timeout=" << receive_timeout_count_
+          << " invalid_frame=" << receive_invalid_frame_count_
+          << " unresolved=" << receive_unresolved_frame_count_
+          << " unknown_motor=" << receive_unknown_motor_count_
+          << " decode_fail=" << receive_decode_failure_count_
+          << std::endl;
+        receive_ok_count_ = 0;
+        receive_timeout_count_ = 0;
+        receive_invalid_frame_count_ = 0;
+        receive_unresolved_frame_count_ = 0;
+        receive_unknown_motor_count_ = 0;
+        receive_decode_failure_count_ = 0;
+        last_receive_diag_log_time_ = now_time;
+      } else if (last_receive_diag_log_time_.time_since_epoch().count() == 0) {
+        last_receive_diag_log_time_ = now_time;
+      }
+
       CAN_Receive_Frame frame {};
       if (!ReadData(frame, receive_timeout_ms_)) {
+        ++receive_timeout_count_;
         continue;
       }
 
       if (!is_valid_feedback_frame(frame)) {
+        ++receive_invalid_frame_count_;
         continue;
       }
 
       const MotorId motor_key = resolve_feedback_motor_key(frame);
       if (motor_key == 0) {
+        ++receive_unresolved_frame_count_;
         continue;
       }
 
       const auto motor_it = motors_.find(motor_key);
       if (motor_it == motors_.end()) {
+        ++receive_unknown_motor_count_;
+        std::cerr << "[RX-WARN] port=" << serial_port_
+                  << " resolved unknown motor_key=" << motor_key
+                  << " can_id=0x" << std::hex << frame.canId << std::dec << std::endl;
         continue;
       }
 
@@ -671,10 +704,15 @@ void Motor_Control::get_motor_data_thread()
       float receive_dq = 0.0f;
       float receive_tau = 0.0f;
       if (!decode_feedback_frame(frame, *motor, receive_q, receive_dq, receive_tau)) {
+        ++receive_decode_failure_count_;
+        std::cerr << "[RX-WARN] port=" << serial_port_
+                  << " decode failed for motor_id=" << motor->GetSlaveId()
+                  << " can_id=0x" << std::hex << frame.canId << std::dec << std::endl;
         continue;
       }
 
       const auto received_at = std::chrono::steady_clock::now();
+      ++receive_ok_count_;
       std::lock_guard<std::mutex> lock(latest_feedback_mutex_);
       auto & cached_feedback = latest_feedback_[motor->GetSlaveId()];
       cached_feedback.q = receive_q;

@@ -7,8 +7,11 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(builtin_interfaces REQUIRED)
+find_package(controller_interface REQUIRED)
+find_package(control_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(PkgConfig REQUIRED)
+find_package(realtime_tools REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(moveit_ros_planning_interface QUIET)
@@ -22,15 +25,18 @@ if(NOT moveit_ros_planning_interface_FOUND AND DEFINED ENV{ROS_DISTRO})
 endif()
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rclcpp_action REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(trajectory_msgs REQUIRED)
 
 pkg_check_modules(LIBSERIAL REQUIRED IMPORTED_TARGET libserial)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ArmCartesianTarget.msg"
   "msg/ArmMotionState.msg"
+  "msg/MitJointCommand.msg"
   "srv/MoveToXZ.srv"
   DEPENDENCIES builtin_interfaces
 )
@@ -75,6 +81,25 @@ target_link_libraries(${PROJECT_NAME}_dm_hw
   ${PROJECT_NAME}_damiao_driver
 )
 
+add_library(${PROJECT_NAME}_mit_command_controller SHARED
+  src/mit_command_controller.cpp
+)
+target_include_directories(${PROJECT_NAME}_mit_command_controller PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+ament_target_dependencies(${PROJECT_NAME}_mit_command_controller
+  controller_interface
+  hardware_interface
+  pluginlib
+  rclcpp
+  realtime_tools
+)
+target_link_libraries(${PROJECT_NAME}_mit_command_controller
+  ${cpp_typesupport_target}
+)
+add_dependencies(${PROJECT_NAME}_mit_command_controller ${PROJECT_NAME})
+
 add_executable(arm_command_server_node
   src/arm_command_server_node.cpp
 )
@@ -83,8 +108,12 @@ target_include_directories(arm_command_server_node PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 ament_target_dependencies(arm_command_server_node
+  control_msgs
   rclcpp
-  geometry_msgs
+  rclcpp_action
+  sensor_msgs
+  std_msgs
+  trajectory_msgs
 )
 target_link_libraries(arm_command_server_node
   ${PROJECT_NAME}_ik_solver
@@ -121,7 +150,9 @@ ament_target_dependencies(ik_commander_node
 )
 target_link_libraries(ik_commander_node
   ${PROJECT_NAME}_ik_solver
+  ${cpp_typesupport_target}
 )
+add_dependencies(ik_commander_node ${PROJECT_NAME})
 
 add_executable(arm_pose_test_node
   src/arm_pose_test_node.cpp
@@ -167,6 +198,7 @@ ament_target_dependencies(joint_state_timestamp_bridge_node
 )
 
 pluginlib_export_plugin_description_file(hardware_interface dm_hw_plugins.xml)
+pluginlib_export_plugin_description_file(controller_interface mit_command_controller_plugins.xml)
 
 install(
   DIRECTORY include/
@@ -180,6 +212,7 @@ install(
 
 install(
   FILES dm_hw_plugins.xml
+        mit_command_controller_plugins.xml
   DESTINATION share/${PROJECT_NAME}
 )
 
@@ -194,6 +227,7 @@ install(
     ${PROJECT_NAME}_ik_solver
     ${PROJECT_NAME}_damiao_driver
     ${PROJECT_NAME}_dm_hw
+    ${PROJECT_NAME}_mit_command_controller
     arm_command_server_node
     ik_commander_node
     arm_pose_test_node

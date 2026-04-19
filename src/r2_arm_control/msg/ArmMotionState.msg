@@ -5,4 +5,14 @@ float64 target_x
 float64 target_z
 bool feedback_ok
 uint8 stale_motor_count
+bool hard_timeout_active
+bool measured_joint_state_valid
+float64 measured_joint_state_age_sec
+float64 target_shoulder_abs_deg
+float64 target_forearm_abs_deg
+float64 target_elbow_rel_deg
+float64 measured_shoulder_abs_deg
+float64 measured_forearm_abs_deg
+float64 measured_elbow_rel_deg
+string executor_mode
 string message

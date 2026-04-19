@@ -2,4 +2,16 @@ float64 x
 float64 z
 ---
 bool accepted
+bool feedback_ok
+bool hard_timeout_active
+float64 measured_joint_state_age_sec
+float64 target_shoulder_abs_deg
+float64 target_forearm_abs_deg
+float64 target_elbow_rel_deg
+float64 measured_shoulder_abs_deg
+float64 measured_forearm_abs_deg
+float64 measured_elbow_rel_deg
+float64 measured_x
+float64 measured_z
+string executor_mode
 string message

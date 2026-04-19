@@ -28,6 +28,7 @@ def _launch_setup(context, *args, **kwargs):
     start_rviz = LaunchConfiguration("start_rviz").perform(context).strip().lower()
     use_sim_time = LaunchConfiguration("use_sim_time")
     arm_config = _load_yaml(LaunchConfiguration("arm_yaml").perform(context))
+    executor_mode = str(arm_config.get("executor_mode", "direct_joint_trajectory")).strip()
     raw_joint_states_topic = arm_config.get("joint_states_topic", "/joint_states")
     moveit_joint_states_topic = arm_config.get("moveit_joint_states_topic", "/joint_states_moveit")
     start_rviz_enabled = start_rviz in ("1", "true", "yes", "on")
@@ -134,13 +135,8 @@ def _launch_setup(context, *args, **kwargs):
     move_to_xz_service_node = Node(
         package="r2_arm_control",
         executable="arm_command_server_node",
-        remappings=[("/joint_states", moveit_joint_states_topic)],
         parameters=[
             arm_config,
-            robot_description,
-            robot_description_semantic,
-            kinematics_yaml,
-            joint_limits_yaml,
             {"use_sim_time": use_sim_time},
         ],
         output="screen",
@@ -176,10 +172,21 @@ def _launch_setup(context, *args, **kwargs):
     actions = [
         control_bringup,
         joint_state_bridge_node,
-        delayed_move_group_node,
         end_effector_state_node,
         delayed_move_to_xz_service_node,
     ]
+
+    if executor_mode == "mit_native_5var":
+        actions.append(
+            LogInfo(
+                msg=(
+                    "executor_mode=mit_native_5var: skipping move_group startup because "
+                    "the move_to_xz service now drives the MIT command stream directly."
+                )
+            )
+        )
+    else:
+        actions.append(delayed_move_group_node)
 
     if start_rviz_enabled:
       if has_display:

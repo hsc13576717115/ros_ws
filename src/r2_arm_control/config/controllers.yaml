@@ -1,30 +1,70 @@
 controller_manager:
   ros__parameters:
+    # controller_manager 主循环频率，单位 Hz。
     update_rate: 200
 
+    # 发布 joint_states 的标准广播器。
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
 
+    # MIT 原生 5 变量单消息控制器。
+    # 通过一条原子消息同时写入 q/dq/tau/kp/kd，避免 5 路 topic 错拍。
+    arm_mit_controller:
+      type: r2_arm_control/MitCommandController
+
+    # 保留的 JointTrajectoryController。
+    # 兼容旧的 direct_joint_trajectory 模式；MIT 原生模式默认不依赖它。
     arm_trajectory_controller:
       type: joint_trajectory_controller/JointTrajectoryController
 
+arm_mit_controller:
+  ros__parameters:
+    # MIT 控制器管理的关节顺序。
+    joints: [shoulder_joint, elbow_joint]
+
 arm_trajectory_controller:
   ros__parameters:
+    # 轨迹控制器管理的关节顺序。
     joints: [shoulder_joint, elbow_joint]
+
+    # 旧模式下轨迹控制器输出的命令接口。
     command_interfaces: [position, velocity]
+
+    # 轨迹控制器读取的状态接口。
     state_interfaces: [position, velocity]
+
+    # false 表示目标必须同时包含全部关节。
     allow_partial_joints_goal: false
+
+    # false 表示使用反馈闭环而不是纯开环推演。
     open_loop_control: false
+
+    # 样条插值，轨迹点之间更平滑。
     interpolation_method: splines
+
+    # 末点不允许带非零速度结束。
     allow_nonzero_velocity_at_trajectory_end: false
+
+    # 控制器状态发布频率，单位 Hz。
     state_publish_rate: 100.0
+
+    # action 监控频率，单位 Hz。
     action_monitor_rate: 20.0
+
     constraints:
+      # 判定“已停止”的速度阈值。
       stopped_velocity_tolerance: 0.10
+
+      # 允许目标超时的公共裕量，单位 s。
       goal_time: 5.0
+
       shoulder_joint:
+        # 轨迹跟踪误差阈值。
         trajectory: 0.45
+
+        # 最终到位误差阈值。
         goal: 0.20
+
       elbow_joint:
         trajectory: 0.45
         goal: 0.20
