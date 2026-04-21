@@ -33,6 +33,8 @@ public:
     declare_parameter("q1_max", 1.4);
     declare_parameter("q2_min", -1.2);
     declare_parameter("q2_max", 1.8);
+    declare_parameter("elbow_rel_min", -1.3962634);
+    declare_parameter("elbow_rel_max", 1.3962634);
 
     declare_parameter("kp_joint0", 15.0);
     declare_parameter("kp_joint1", 15.0);
@@ -52,6 +54,8 @@ public:
     params_.q1_max = get_parameter("q1_max").as_double();
     params_.q2_min = get_parameter("q2_min").as_double();
     params_.q2_max = get_parameter("q2_max").as_double();
+    params_.elbow_rel_min = get_parameter("elbow_rel_min").as_double();
+    params_.elbow_rel_max = get_parameter("elbow_rel_max").as_double();
 
     kp0_ = get_parameter("kp_joint0").as_double();
     kp1_ = get_parameter("kp_joint1").as_double();

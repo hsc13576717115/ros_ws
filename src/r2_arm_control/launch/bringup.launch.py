@@ -28,6 +28,8 @@ def _build_robot_description(motors: dict, arm: dict) -> str:
     elbow_mit_kp = arm.get("kp_joint1", 0.0)
     elbow_mit_kd = arm.get("kd_joint1", 0.0)
     elbow_mit_ff = arm.get("feedforward_joint1", 0.0)
+    elbow_rel_min = arm.get("elbow_rel_min", -1.3962634)
+    elbow_rel_max = arm.get("elbow_rel_max", 1.3962634)
 
     return textwrap.dedent(
         f"""\
@@ -118,7 +120,7 @@ def _build_robot_description(motors: dict, arm: dict) -> str:
             <child link="forearm_link"/>
             <origin xyz="0 0 {arm['d1']}" rpy="0 0 0"/>
             <axis xyz="0 1 0"/>
-            <limit lower="{arm['q2_min']}" upper="{arm['q2_max']}" effort="30.0" velocity="2.0"/>
+            <limit lower="{elbow_rel_min}" upper="{elbow_rel_max}" effort="30.0" velocity="2.0"/>
           </joint>
 
           <joint name="tool_joint" type="fixed">
@@ -149,6 +151,8 @@ def _build_robot_description(motors: dict, arm: dict) -> str:
               <param name="motor_type">{escape(str(motors['joint0']['motor_type']))}</param>
               <param name="motor_sign">{shoulder_motor_sign}</param>
               <param name="zero_offset_rad">{shoulder_zero_offset_rad}</param>
+              <param name="position_min">{arm['q1_min']}</param>
+              <param name="position_max">{arm['q1_max']}</param>
               <param name="mit_kp">{shoulder_mit_kp}</param>
               <param name="mit_kd">{shoulder_mit_kd}</param>
               <param name="mit_feedforward">{shoulder_mit_ff}</param>
@@ -170,6 +174,8 @@ def _build_robot_description(motors: dict, arm: dict) -> str:
               <param name="motor_type">{escape(str(motors['joint1']['motor_type']))}</param>
               <param name="motor_sign">{elbow_motor_sign}</param>
               <param name="zero_offset_rad">{elbow_zero_offset_rad}</param>
+              <param name="position_min">{elbow_rel_min}</param>
+              <param name="position_max">{elbow_rel_max}</param>
               <param name="mit_kp">{elbow_mit_kp}</param>
               <param name="mit_kd">{elbow_mit_kd}</param>
               <param name="mit_feedforward">{elbow_mit_ff}</param>

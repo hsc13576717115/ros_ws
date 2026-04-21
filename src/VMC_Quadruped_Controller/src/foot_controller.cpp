@@ -9,6 +9,7 @@
 #include <string>
 
 #include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/string.hpp"
 
 class Foot_Controller : public rclcpp::Node{
     private:
@@ -21,6 +22,7 @@ class Foot_Controller : public rclcpp::Node{
         rclcpp::Subscription<yesense_interface::msg::EulerOnly>::SharedPtr euler_subscription;
         rclcpp::Subscription<r2_arm_control::msg::ArmMotionState>::SharedPtr arm_state_subscription;
         rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr gpio_state_subscription;
+        rclcpp::Subscription<std_msgs::msg::String>::SharedPtr arm_state_name_subscription;
         rclcpp::Publisher<r2_arm_control::msg::ArmCartesianTarget>::SharedPtr arm_target_publisher;
         rclcpp::TimerBase::SharedPtr arm_control_timer;
         rclcpp::TimerBase::SharedPtr status_line_timer;
@@ -52,12 +54,12 @@ class Foot_Controller : public rclcpp::Node{
         double arm_target_z = 0.30;
         double arm_current_x = 0.30;
         double arm_current_z = 0.30;
-        double arm_report_target_x = 0.30;
-        double arm_report_target_z = 0.30;
         bool arm_state_received = false;
         bool arm_target_initialized = false;
         bool gpio_state = false;
         bool gpio_state_received = false;
+        std::string arm_state_name = "idle";
+        bool arm_state_name_received = false;
         float init_pos[4][2]
             ,leg_pos[4][2] // leg_pos {x,y}
             ,period = NORMAL_GAIT_PERIOD
@@ -80,6 +82,8 @@ class Foot_Controller : public rclcpp::Node{
             "/r2/arm/state", 10, std::bind(&Foot_Controller::arm_state_callback, this, std::placeholders::_1));
         gpio_state_subscription = this->create_subscription<std_msgs::msg::Bool>(
             "/r2/manual/dpad_down_gpio36_state", 10, std::bind(&Foot_Controller::gpio_state_callback, this, std::placeholders::_1));
+        arm_state_name_subscription = this->create_subscription<std_msgs::msg::String>(
+            "/r2/arm/state_machine_state", 10, std::bind(&Foot_Controller::arm_state_name_callback, this, std::placeholders::_1));
         arm_target_publisher = this->create_publisher<r2_arm_control::msg::ArmCartesianTarget>("/r2/arm/target_xz", 10);
         arm_control_timer = this->create_wall_timer(
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(arm_control_period_sec)),
@@ -158,8 +162,6 @@ class Foot_Controller : public rclcpp::Node{
     private: void arm_state_callback(const r2_arm_control::msg::ArmMotionState::SharedPtr msg){
         arm_current_x = msg->current_x;
         arm_current_z = msg->current_z;
-        arm_report_target_x = msg->target_x;
-        arm_report_target_z = msg->target_z;
         arm_state_received = true;
         if(!arm_target_initialized){
             arm_target_x = clamp_arm_x(arm_current_x);
@@ -171,18 +173,40 @@ class Foot_Controller : public rclcpp::Node{
         gpio_state = msg->data;
         gpio_state_received = true;
     }
+    private: void arm_state_name_callback(const std_msgs::msg::String::SharedPtr msg){
+        arm_state_name = msg->data;
+        arm_state_name_received = true;
+    }
+    private: const char * arm_state_label() const{
+        if(!arm_state_name_received){
+            return "---";
+        }
+        if(arm_state_name == "idle"){
+            return "闲置";
+        }
+        if(arm_state_name == "pick"){
+            return "吸取";
+        }
+        if(arm_state_name == "store"){
+            return "存储";
+        }
+        if(arm_state_name == "place"){
+            return "放置";
+        }
+        return arm_state_name.c_str();
+    }
     private: void status_line_timer_callback(){
-        const char * gpio_label = gpio_state_received ? (gpio_state ? "ON " : "OFF") : "---";
+        const char * gpio_label = gpio_state_received ? (gpio_state ? "高电平" : "低电平") : "---";
+        const char * state_label = arm_state_label();
         if(arm_state_received){
             std::printf(
-                "\rARM cur(%.3f, %.3f)  target(%.3f, %.3f)  GPIO36:%s",
+                "\r末端xz(%.3f, %.3f)  继电器:%s  状态:%s            ",
                 arm_current_x,
                 arm_current_z,
-                arm_report_target_x,
-                arm_report_target_z,
-                gpio_label);
+                gpio_label,
+                state_label);
         }else{
-            std::printf("\rARM cur(--, --)  target(--, --)  GPIO36:%s", gpio_label);
+            std::printf("\r末端xz(--, --)  继电器:%s  状态:%s            ", gpio_label, state_label);
         }
         std::fflush(stdout);
     }

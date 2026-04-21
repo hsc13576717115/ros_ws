@@ -112,7 +112,7 @@ def _launch_setup(context, *args, **kwargs):
             },
             {"use_sim_time": use_sim_time},
         ],
-        output="screen",
+        output="log",
     )
 
     move_group_node = Node(
@@ -139,7 +139,7 @@ def _launch_setup(context, *args, **kwargs):
             arm_config,
             {"use_sim_time": use_sim_time},
         ],
-        output="screen",
+        output="log",
     )
 
     end_effector_state_node = Node(
@@ -149,7 +149,7 @@ def _launch_setup(context, *args, **kwargs):
             arm_config,
             {"use_sim_time": use_sim_time},
         ],
-        output="screen",
+        output="log",
     )
 
     rviz_node = Node(

@@ -22,8 +22,11 @@ bool IkSolver::isReachable(double x, double z) const
 
 bool IkSolver::withinLimits(double q1, double q2) const
 {
-  return (q1 >= params_.q1_min && q1 <= params_.q1_max &&
-    q2 >= params_.q2_min && q2 <= params_.q2_max);
+  const double elbow_rel = normalizeAngle(q2 - q1);
+  return (
+    q1 >= params_.q1_min && q1 <= params_.q1_max &&
+    q2 >= params_.q2_min && q2 <= params_.q2_max &&
+    elbow_rel >= params_.elbow_rel_min && elbow_rel <= params_.elbow_rel_max);
 }
 
 FkResult IkSolver::forward(double q1, double q2) const

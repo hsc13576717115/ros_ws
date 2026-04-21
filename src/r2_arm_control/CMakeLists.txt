@@ -218,6 +218,7 @@ install(
 
 install(
   PROGRAMS
+    scripts/arm_state_machine_node.py
     scripts/dpad_gpio_toggle_node.py
   DESTINATION lib/${PROJECT_NAME}
 )

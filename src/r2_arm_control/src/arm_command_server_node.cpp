@@ -46,6 +46,8 @@ public:
     declare_parameter("q1_max", 1.80);
     declare_parameter("q2_min", -1.80);
     declare_parameter("q2_max", 1.80);
+    declare_parameter("elbow_rel_min", -1.3962634);
+    declare_parameter("elbow_rel_max", 1.3962634);
     declare_parameter("elbow_up", true);
     declare_parameter("move_service_name", "/r2/arm/move_to_xz");
     declare_parameter("state_topic", "/r2/arm/state");
@@ -67,10 +69,15 @@ public:
     declare_parameter("trajectory_start_delay_sec", 0.05);
     declare_parameter("trajectory_execution_timeout_margin_sec", 1.50);
     declare_parameter("direct_goal_tolerance_rad", 0.02);
+    declare_parameter("cartesian_goal_tolerance_m", 0.01);
     declare_parameter("ee_linear_speed_limit", 0.08);
     declare_parameter("ee_linear_acc_limit", 0.20);
     declare_parameter("joint_velocity_smoothing", 0.35);
     declare_parameter("jacobian_damping", 0.02);
+    declare_parameter("cartesian_correction_gain", 0.80);
+    declare_parameter("cartesian_correction_max_step_m", 0.015);
+    declare_parameter("cartesian_correction_max_attempts", 2);
+    declare_parameter("cartesian_correction_interval_sec", 0.15);
     declare_parameter("shoulder_kp_extension_gain", 0.0);
     declare_parameter("shoulder_kd_extension_gain", 0.0);
     declare_parameter("elbow_kp_extension_gain", 0.0);
@@ -103,6 +110,8 @@ public:
     ik_params_.q1_max = get_parameter("q1_max").as_double();
     ik_params_.q2_min = get_parameter("q2_min").as_double();
     ik_params_.q2_max = get_parameter("q2_max").as_double();
+    ik_params_.elbow_rel_min = get_parameter("elbow_rel_min").as_double();
+    ik_params_.elbow_rel_max = get_parameter("elbow_rel_max").as_double();
     elbow_up_ = get_parameter("elbow_up").as_bool();
     solver_ = r2_arm_control::IkSolver(ik_params_);
 
@@ -132,6 +141,8 @@ public:
       std::max(0.20, get_parameter("trajectory_execution_timeout_margin_sec").as_double());
     direct_goal_tolerance_rad_ =
       std::clamp(get_parameter("direct_goal_tolerance_rad").as_double(), 1e-4, 0.20);
+    cartesian_goal_tolerance_m_ =
+      std::clamp(get_parameter("cartesian_goal_tolerance_m").as_double(), 0.001, 0.10);
     ee_linear_speed_limit_ =
       std::max(0.005, get_parameter("ee_linear_speed_limit").as_double());
     ee_linear_acc_limit_ =
@@ -140,6 +151,14 @@ public:
       std::clamp(get_parameter("joint_velocity_smoothing").as_double(), 0.0, 0.95);
     jacobian_damping_ =
       std::clamp(get_parameter("jacobian_damping").as_double(), 1e-5, 0.20);
+    cartesian_correction_gain_ =
+      std::clamp(get_parameter("cartesian_correction_gain").as_double(), 0.0, 2.0);
+    cartesian_correction_max_step_m_ =
+      std::clamp(get_parameter("cartesian_correction_max_step_m").as_double(), 0.0, 0.10);
+    cartesian_correction_max_attempts_ =
+      std::max<int>(0, get_parameter("cartesian_correction_max_attempts").as_int());
+    cartesian_correction_interval_sec_ =
+      std::clamp(get_parameter("cartesian_correction_interval_sec").as_double(), 0.02, 1.0);
     shoulder_kp_extension_gain_ =
       std::max(0.0, get_parameter("shoulder_kp_extension_gain").as_double());
     shoulder_kd_extension_gain_ =
@@ -330,6 +349,13 @@ private:
   static double cartesianDistance(const CartesianPoint & from, const CartesianPoint & to)
   {
     return std::hypot(to.x - from.x, to.z - from.z);
+  }
+
+  static CartesianPoint cartesianError(
+    const CartesianPoint & measured,
+    const CartesianPoint & target)
+  {
+    return {target.x - measured.x, target.z - measured.z};
   }
 
   static std::string formatAngleTriplet(
@@ -739,6 +765,45 @@ private:
     return std::isfinite(shoulder_vel) && std::isfinite(forearm_vel);
   }
 
+  bool computeCorrectedJointGoal(
+    const MeasuredState & measured,
+    const CartesianPoint & nominal_target,
+    JointGoal & corrected_goal,
+    CartesianPoint & corrected_target) const
+  {
+    const CartesianPoint measured_cartesian {measured.x, measured.z};
+    const CartesianPoint error = cartesianError(measured_cartesian, nominal_target);
+    const double error_norm = std::hypot(error.x, error.z);
+    if (error_norm <= cartesian_goal_tolerance_m_ || cartesian_correction_gain_ <= 0.0) {
+      return false;
+    }
+
+    double correction_scale = cartesian_correction_gain_;
+    if (cartesian_correction_max_step_m_ > 0.0) {
+      const double requested_step = correction_scale * error_norm;
+      if (requested_step > cartesian_correction_max_step_m_) {
+        correction_scale = cartesian_correction_max_step_m_ / error_norm;
+      }
+    }
+
+    for (int attempt = 0; attempt < 4; ++attempt) {
+      corrected_target.x = nominal_target.x + error.x * correction_scale;
+      corrected_target.z = nominal_target.z + error.z * correction_scale;
+      if (solveContinuousJointGoal(
+            corrected_target.x,
+            corrected_target.z,
+            measured.shoulder_abs,
+            measured.forearm_abs,
+            corrected_goal))
+      {
+        return true;
+      }
+      correction_scale *= 0.5;
+    }
+
+    return false;
+  }
+
   double computeMotionDuration(const MeasuredState & start, const JointGoal & goal) const
   {
     const double shoulder_delta = std::fabs(shortestAngularDistance(start.shoulder_abs, goal.shoulder));
@@ -1070,7 +1135,13 @@ private:
       std::chrono::steady_clock::now() +
       std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double>(mit_settle_timeout_sec_));
+    const auto correction_interval =
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(cartesian_correction_interval_sec_));
     bool stale_during_settle = false;
+    JointGoal settle_goal = goal;
+    int correction_attempts = 0;
+    auto next_correction_time = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() <= settle_deadline) {
       MeasuredState measured_snapshot;
       bool hard_timeout = false;
@@ -1087,7 +1158,7 @@ private:
         return execution;
       }
 
-      publishMitCommand(goal.shoulder, goal.forearm, 0.0, 0.0);
+      publishMitCommand(settle_goal.shoulder, settle_goal.forearm, 0.0, 0.0);
 
       if (stale_feedback) {
         stale_during_settle = true;
@@ -1096,31 +1167,65 @@ private:
       }
 
       const double shoulder_error =
-        std::fabs(shortestAngularDistance(measured_snapshot.shoulder_abs, goal.shoulder));
+        std::fabs(shortestAngularDistance(measured_snapshot.shoulder_abs, settle_goal.shoulder));
       const double forearm_error =
-        std::fabs(shortestAngularDistance(measured_snapshot.forearm_abs, goal.forearm));
-      if (
-        shoulder_error <= direct_goal_tolerance_rad_ &&
-        forearm_error <= direct_goal_tolerance_rad_)
-      {
+        std::fabs(shortestAngularDistance(measured_snapshot.forearm_abs, settle_goal.forearm));
+      const CartesianPoint measured_cartesian {measured_snapshot.x, measured_snapshot.z};
+      const CartesianPoint cartesian_error =
+        cartesianError(measured_cartesian, target_cartesian);
+      const double cartesian_error_norm = std::hypot(cartesian_error.x, cartesian_error.z);
+      if (cartesian_error_norm <= cartesian_goal_tolerance_m_) {
         execution.success = true;
-        execution.message = lost_fresh_feedback_during_motion
-          ? "MIT native trajectory stream succeeded after temporary stale feedback recovered."
-          : "MIT native trajectory succeeded.";
+        std::ostringstream oss;
+        oss << (lost_fresh_feedback_during_motion
+            ? "MIT native trajectory stream succeeded after temporary stale feedback recovered."
+            : "MIT native trajectory succeeded.")
+            << " Final Cartesian error=" << cartesian_error_norm
+            << " m, settle shoulder error=" << shoulder_error
+            << " rad, settle forearm error=" << forearm_error << " rad.";
+        execution.message = oss.str();
         return execution;
+      }
+
+      if (
+        correction_attempts < cartesian_correction_max_attempts_ &&
+        cartesian_error_norm > cartesian_goal_tolerance_m_ &&
+        std::chrono::steady_clock::now() >= next_correction_time)
+      {
+        JointGoal corrected_goal;
+        CartesianPoint corrected_target;
+        if (computeCorrectedJointGoal(
+              measured_snapshot, target_cartesian, corrected_goal, corrected_target))
+        {
+          settle_goal = corrected_goal;
+          ++correction_attempts;
+          next_correction_time = std::chrono::steady_clock::now() + correction_interval;
+          RCLCPP_INFO(
+            get_logger(),
+            "Applying Cartesian settle correction %d/%d: err=%.4f m -> corrected x=%.4f z=%.4f",
+            correction_attempts,
+            cartesian_correction_max_attempts_,
+            cartesian_error_norm,
+            corrected_target.x - x_offset_,
+            corrected_target.z - z_offset_);
+        }
       }
 
       std::this_thread::sleep_for(sample_period);
     }
 
     if (stale_during_settle || lost_fresh_feedback_during_motion) {
-      execution.success = true;
+      execution.success = false;
       execution.message =
-        "MIT native trajectory stream completed, but final settle could not be fully confirmed because joint feedback was stale.";
+        "MIT native trajectory stream completed, but final settle could not be confirmed because joint feedback was stale.";
       return execution;
     }
 
-    execution.message = "MIT native execution reached the hold phase but did not settle inside the joint tolerance window.";
+    std::ostringstream oss;
+    oss << "MIT native execution reached the hold phase but did not settle inside tolerance. "
+        << "Cartesian tolerance=" << cartesian_goal_tolerance_m_
+        << " m, joint tolerance=" << direct_goal_tolerance_rad_ << " rad.";
+    execution.message = oss.str();
     return execution;
   }
 
@@ -1291,10 +1396,15 @@ private:
   double trajectory_start_delay_sec_ {0.05};
   double trajectory_execution_timeout_margin_sec_ {1.50};
   double direct_goal_tolerance_rad_ {0.02};
+  double cartesian_goal_tolerance_m_ {0.01};
   double ee_linear_speed_limit_ {0.08};
   double ee_linear_acc_limit_ {0.20};
   double joint_velocity_smoothing_ {0.35};
   double jacobian_damping_ {0.02};
+  double cartesian_correction_gain_ {0.80};
+  double cartesian_correction_max_step_m_ {0.015};
+  int cartesian_correction_max_attempts_ {2};
+  double cartesian_correction_interval_sec_ {0.15};
   double shoulder_kp_extension_gain_ {0.0};
   double shoulder_kd_extension_gain_ {0.0};
   double elbow_kp_extension_gain_ {0.0};

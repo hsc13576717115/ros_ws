@@ -13,16 +13,25 @@ d2: 0.30
 forearm_mount_offset_rad: 0.0
 
 # 肩关节绝对角度下限，单位 rad。
-q1_min: -3.14
+# 机械保护：限制肩关节最多前后转约 80 度。
+q1_min: -1.3962634
 
 # 肩关节绝对角度上限，单位 rad。
-q1_max: 3.14
+q1_max: 1.3962634
 
 # 前臂绝对角度下限，单位 rad。
+# 这是前臂“绝对角”限制，不是肘关节相对角限制。
 q2_min: -3.14
 
 # 前臂绝对角度上限，单位 rad。
 q2_max: 3.14
+
+# 肘关节相对角下限，单位 rad。
+# 机械保护：限制肘关节最多前后转约 80 度。
+elbow_rel_min: -1.3962634
+
+# 肘关节相对角上限，单位 rad。
+elbow_rel_max: 1.3962634
 
 
 # ------------------------------
@@ -31,10 +40,10 @@ q2_max: 3.14
 
 # joint0（肩关节）的 MIT 刚度系数 kp。
 # 值越大越“硬”，响应更快，但过大可能振动或啸叫。
-kp_joint0: 60.0
+kp_joint0: 45.0
 
 # joint1（肘关节）的 MIT 刚度系数 kp。
-kp_joint1: 60.0
+kp_joint1: 45.0
 
 # joint0（肩关节）的 MIT 阻尼系数 kd。
 # 值越大越“粘”，更能抑制过冲，但过大可能动作发闷。
@@ -122,11 +131,11 @@ trajectory_sample_period_sec: 0.02
 
 # 末端笛卡尔直线轨迹的巡航速度上限，单位 m/s。
 # MIT 原生模式会优先按这个速度让末端接近匀速运动。
-ee_linear_speed_limit: 0.08
+ee_linear_speed_limit: 0.10
 
 # 末端笛卡尔直线轨迹的加速度上限，单位 m/s^2。
 # 值越小，起停越柔和；值越大，更容易快速进入匀速段。
-ee_linear_acc_limit: 0.20
+ee_linear_acc_limit: 0.25
 
 # 关节速度命令平滑系数，范围建议 0~0.8。
 # 越大越平滑，但相位滞后也会更明显。
@@ -196,6 +205,24 @@ trajectory_execution_timeout_margin_sec: 1.50
 # 判定“已到位”的关节误差阈值，单位 rad。
 direct_goal_tolerance_rad: 0.02
 
+# 判定“末端已到位”的笛卡尔误差阈值，单位 m。
+# 如果你的目标是末端 1 cm 内，建议保持 0.01。
+cartesian_goal_tolerance_m: 0.01
+
+# 进入最终保持段后，如果末端仍有残余误差，就按这个比例做小幅超调修正。
+# 值越大修正越积极，过大可能来回摆；建议 0.5~1.0 之间起步。
+cartesian_correction_gain: 0.80
+
+# 单次末端修正的最大笛卡尔步长，单位 m。
+# 这个限幅能避免最后几次修正过猛。
+cartesian_correction_max_step_m: 0.015
+
+# 最终保持段里允许做几次末端修正。
+cartesian_correction_max_attempts: 2
+
+# 两次末端修正之间的最小间隔，单位 s。
+cartesian_correction_interval_sec: 0.15
+
 # MIT 原生模式进入最终保持段后，等待稳定到目标窗口内的最长时间，单位 s。
 mit_settle_timeout_sec: 0.60
 
@@ -206,11 +233,11 @@ mit_settle_timeout_sec: 0.60
 
 # 反馈软超时阈值，单位 s。
 # 超过这个时间没收到有效反馈，feedback_ok 会变差。
-feedback_timeout_sec: 2.0
+feedback_timeout_sec: 0.15
 
 # 反馈硬超时阈值，单位 s。
 # 超过这个时间会触发安全保持，命令冻结到当前位姿。
-feedback_hard_timeout_sec: 1.50
+feedback_hard_timeout_sec: 0.30
 
 # 上电后的反馈宽限期，单位 s。
 # 刚启动时允许短时间内还没有稳定反馈。
@@ -253,6 +280,55 @@ executor_mode: mit_native_5var
 # 旧的 trajectory action 名称。
 # 仅在 direct_joint_trajectory 模式下会真正用到。
 trajectory_controller_action_name: /arm_trajectory_controller/follow_joint_trajectory
+
+
+# ------------------------------
+# 手柄状态机目标点
+# ------------------------------
+
+# 空闲状态：GPIO36 低电平，回到待机点。
+idle_x: 0.05
+idle_z: 0.30
+idle_ee_linear_speed_limit: 0.10
+idle_ee_linear_acc_limit: 0.25
+idle_kp_joint0: 60.0
+idle_kp_joint1: 60.0
+idle_kd_joint0: 2.0
+idle_kd_joint1: 2.0
+
+# 启动安全回空闲：上电后的第一次回 idle 使用更慢的速度，降低碰撞风险。
+startup_idle_ee_linear_speed_limit: 0.04
+startup_idle_ee_linear_acc_limit: 0.08
+
+# 吸取状态：先拉高 GPIO36，再移动到吸取点。
+pick_x: 0.35
+pick_z: -0.05
+pick_ee_linear_speed_limit: 0.10
+pick_ee_linear_acc_limit: 0.25
+pick_kp_joint0: 60.0
+pick_kp_joint1: 60.0
+pick_kd_joint0: 2.0
+pick_kd_joint1: 2.0
+
+# 存储状态：保持 GPIO36 高电平，回到存储点。
+store_x: 0.05
+store_z: 0.30
+store_ee_linear_speed_limit: 0.10
+store_ee_linear_acc_limit: 0.25
+store_kp_joint0: 60.0
+store_kp_joint1: 60.0
+store_kd_joint0: 2.0
+store_kd_joint1: 2.0
+
+# 放置状态：先移动到放置点，到位后再拉低 GPIO36。
+place_x: 0.35
+place_z: -0.05
+place_ee_linear_speed_limit: 0.10
+place_ee_linear_acc_limit: 0.25
+place_kp_joint0: 60.0
+place_kp_joint1: 60.0
+place_kd_joint0: 2.0
+place_kd_joint1: 2.0
 
 
 # ------------------------------

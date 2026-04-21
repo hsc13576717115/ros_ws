@@ -64,6 +64,8 @@ TEST(IkSolverTest, SolveAndForwardStayConsistent)
   params.q1_max = kPi;
   params.q2_min = -kPi;
   params.q2_max = kPi;
+  params.elbow_rel_min = -kPi;
+  params.elbow_rel_max = kPi;
 
   r2_arm_control::IkSolver solver(params);
   const auto ik = solver.solve(0.18, 0.36, true);
@@ -82,6 +84,8 @@ TEST(IkSolverTest, SolveAndForwardStayConsistentForNegativeZTarget)
   params.q1_max = kPi;
   params.q2_min = -kPi;
   params.q2_max = kPi;
+  params.elbow_rel_min = -kPi;
+  params.elbow_rel_max = kPi;
 
   r2_arm_control::IkSolver solver(params);
   const auto ik = solver.solve(0.15, -0.10, true);
@@ -109,9 +113,25 @@ TEST(IkSolverTest, RejectsTargetOutsideJointLimits)
   params.q1_max = 0.20;
   params.q2_min = -0.10;
   params.q2_max = 0.10;
+  params.elbow_rel_min = -kPi;
+  params.elbow_rel_max = kPi;
 
   r2_arm_control::IkSolver solver(params);
   EXPECT_FALSE(solver.solve(0.30, 0.30, true).success);
+}
+
+TEST(IkSolverTest, RejectsTargetOutsideElbowRelativeLimits)
+{
+  r2_arm_control::ArmParams params;
+  params.q1_min = -kPi;
+  params.q1_max = kPi;
+  params.q2_min = -kPi;
+  params.q2_max = kPi;
+  params.elbow_rel_min = -0.2;
+  params.elbow_rel_max = 0.2;
+
+  r2_arm_control::IkSolver solver(params);
+  EXPECT_FALSE(solver.solve(0.10, 0.10, true).success);
 }
 
 }  // namespace

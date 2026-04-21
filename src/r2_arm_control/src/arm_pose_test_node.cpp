@@ -33,6 +33,8 @@ public:
     declare_parameter("q1_max", 1.80);
     declare_parameter("q2_min", -1.80);
     declare_parameter("q2_max", 1.80);
+    declare_parameter("elbow_rel_min", -1.3962634);
+    declare_parameter("elbow_rel_max", 1.3962634);
     declare_parameter("q1_phys_deg", 0.0);
     declare_parameter("q2_phys_deg", 0.0);
     declare_parameter("use_target_ik", false);
@@ -50,6 +52,8 @@ public:
     params_.q1_max = get_parameter("q1_max").as_double();
     params_.q2_min = get_parameter("q2_min").as_double();
     params_.q2_max = get_parameter("q2_max").as_double();
+    params_.elbow_rel_min = get_parameter("elbow_rel_min").as_double();
+    params_.elbow_rel_max = get_parameter("elbow_rel_max").as_double();
 
     const double q1_phys_deg = get_parameter("q1_phys_deg").as_double();
     const double q2_phys_deg = get_parameter("q2_phys_deg").as_double();

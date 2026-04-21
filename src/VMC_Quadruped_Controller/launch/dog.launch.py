@@ -1,11 +1,17 @@
+import os
+import yaml
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-import os
-from ament_index_python.packages import get_package_share_directory
+
+
+def _load_yaml(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle) or {}
  
 def generate_launch_description():
 
@@ -14,11 +20,17 @@ def generate_launch_description():
         'config',
         'yesense_config.yaml',
     )
-    arm_bringup_launch = os.path.join(
-        get_package_share_directory('r2_arm_control'),
+    arm_moveit_launch = os.path.join(
+        get_package_share_directory('r2_arm_moveit_config'),
         'launch',
-        'bringup.launch.py',
+        'moveit.launch.py',
     )
+    arm_yaml = os.path.join(
+        get_package_share_directory('r2_arm_control'),
+        'config',
+        'arm.yaml',
+    )
+    arm_config = _load_yaml(arm_yaml)
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -50,11 +62,9 @@ def generate_launch_description():
         ),
         Node(
             package='r2_arm_control',
-            executable='dpad_gpio_toggle_node.py',
-            output='screen',
-            parameters=[{
-                'gpio_number': 36,
-            }],
+            executable='arm_state_machine_node.py',
+            output='log',
+            parameters=[arm_config],
             condition=IfCondition(LaunchConfiguration('start_dpad_gpio')),
         ),
         # Node(
@@ -63,10 +73,9 @@ def generate_launch_description():
         #     output='log'
         # )
         IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(arm_bringup_launch),
+            PythonLaunchDescriptionSource(arm_moveit_launch),
             launch_arguments={
-                'start_ros2_control': 'true',
-                'start_command_server': 'true',
+                'arm_yaml': arm_yaml,
                 'start_rviz': 'false',
             }.items(),
             condition=IfCondition(LaunchConfiguration('start_arm')),

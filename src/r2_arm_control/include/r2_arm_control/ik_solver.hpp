@@ -9,10 +9,15 @@ struct ArmParams
   double d2 {0.30};
   // Forearm absolute-angle mounting offset. Zero means q2=0 points along +x.
   double forearm_mount_offset_rad {0.0};
+  // Shoulder absolute-angle limits.
   double q1_min {-0.80};
   double q1_max {1.40};
+  // Forearm absolute-angle limits.
   double q2_min {-1.20};
   double q2_max {1.80};
+  // Elbow relative-angle limits, where elbow_rel = q2 - q1.
+  double elbow_rel_min {-1.3962634};
+  double elbow_rel_max {1.3962634};
 };
 
 struct IkResult

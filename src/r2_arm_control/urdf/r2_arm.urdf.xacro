@@ -17,6 +17,8 @@
   <xacro:property name="shoulder_transmission_ratio" value="${arm.get('shoulder_transmission_ratio', 1.0)}"/>
   <xacro:property name="elbow_transmission_ratio" value="${arm.get('elbow_transmission_ratio', 1.0)}"/>
   <xacro:property name="elbow_absolute_reference_joint" value="${arm.get('elbow_absolute_reference_joint', '')}"/>
+  <xacro:property name="elbow_rel_min" value="${arm.get('elbow_rel_min', -1.3962634)}"/>
+  <xacro:property name="elbow_rel_max" value="${arm.get('elbow_rel_max', 1.3962634)}"/>
   <xacro:property name="shoulder_mit_kp" value="${arm.get('kp_joint0', 0.0)}"/>
   <xacro:property name="shoulder_mit_kd" value="${arm.get('kd_joint0', 0.0)}"/>
   <xacro:property name="shoulder_mit_ff" value="${arm.get('feedforward_joint0', 0.0)}"/>
@@ -114,8 +116,8 @@
     <origin xyz="0 0 ${d1}" rpy="0 ${forearm_mount_offset_rad} 0"/>
     <axis xyz="0 1 0"/>
     <limit
-      lower="${arm['q2_min']}"
-      upper="${arm['q2_max']}"
+      lower="${elbow_rel_min}"
+      upper="${elbow_rel_max}"
       effort="30.0"
       velocity="2.0"/>
   </joint>
@@ -149,6 +151,8 @@
       <param name="motor_sign">${shoulder_motor_sign}</param>
       <param name="zero_offset_rad">${shoulder_zero_offset_rad}</param>
       <param name="transmission_ratio">${shoulder_transmission_ratio}</param>
+      <param name="position_min">${arm['q1_min']}</param>
+      <param name="position_max">${arm['q1_max']}</param>
       <param name="mit_kp">${shoulder_mit_kp}</param>
       <param name="mit_kd">${shoulder_mit_kd}</param>
       <param name="mit_feedforward">${shoulder_mit_ff}</param>
@@ -174,6 +178,8 @@
       <param name="zero_offset_rad">${elbow_zero_offset_rad}</param>
       <param name="transmission_ratio">${elbow_transmission_ratio}</param>
       <param name="absolute_reference_joint">${elbow_absolute_reference_joint}</param>
+      <param name="position_min">${elbow_rel_min}</param>
+      <param name="position_max">${elbow_rel_max}</param>
       <param name="mit_kp">${elbow_mit_kp}</param>
       <param name="mit_kd">${elbow_mit_kd}</param>
       <param name="mit_feedforward">${elbow_mit_ff}</param>

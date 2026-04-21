@@ -28,6 +28,25 @@ double blendCommandValue(double previous, double target, double alpha)
   return previous + clamped_alpha * (target - previous);
 }
 
+double wrapAngleNearReference(double angle, double reference)
+{
+  if (!std::isfinite(angle) || !std::isfinite(reference)) {
+    return angle;
+  }
+
+  return reference + std::atan2(std::sin(angle - reference), std::cos(angle - reference));
+}
+
+double clampToPositionLimits(double angle, const JointAngleMapping & mapping)
+{
+  if (!std::isfinite(angle)) {
+    return angle;
+  }
+  const double lower = std::min(mapping.position_min, mapping.position_max);
+  const double upper = std::max(mapping.position_min, mapping.position_max);
+  return std::clamp(angle, lower, upper);
+}
+
 DM_Motor_Type stringToMotorType(const std::string & type_str)
 {
   if (type_str == "DM4310") {
@@ -199,6 +218,8 @@ hardware_interface::CallbackReturn DmHW::on_init(const hardware_interface::Hardw
     const double transmission_ratio = getJointParamOr<double>(joint, "transmission_ratio", 1.0);
     const std::string absolute_reference_joint = getJointParamOr<std::string>(
       joint, "absolute_reference_joint", "");
+    const double position_min = getJointParamOr<double>(joint, "position_min", -M_PI);
+    const double position_max = getJointParamOr<double>(joint, "position_max", M_PI);
     const double mit_kp = getJointParamOr<double>(joint, "mit_kp", 0.0);
     const double mit_kd = getJointParamOr<double>(joint, "mit_kd", 0.0);
     const double mit_feedforward = getJointParamOr<double>(joint, "mit_feedforward", 0.0);
@@ -222,14 +243,14 @@ hardware_interface::CallbackReturn DmHW::on_init(const hardware_interface::Hardw
     hw_actuator_data_[i] = data;
     joint_mappings_[i] =
       JointAngleMapping {joint.name, motor_sign, zero_offset_rad, transmission_ratio,
-        absolute_reference_joint};
+        absolute_reference_joint, position_min, position_max};
     joint_index_by_name_[joint.name] = i;
 
     RCLCPP_INFO(
       rclcpp::get_logger("DmHW"),
-      "Joint '%s': motor_sign=%.3f zero_offset_rad=%.6f transmission_ratio=%.6f absolute_reference_joint='%s' mit_kp=%.3f mit_kd=%.3f mit_ff=%.3f",
+      "Joint '%s': motor_sign=%.3f zero_offset_rad=%.6f transmission_ratio=%.6f absolute_reference_joint='%s' position_limits=[%.3f, %.3f] mit_kp=%.3f mit_kd=%.3f mit_ff=%.3f",
       joint.name.c_str(), motor_sign, zero_offset_rad, transmission_ratio,
-      absolute_reference_joint.c_str(), mit_kp, mit_kd, mit_feedforward);
+      absolute_reference_joint.c_str(), position_min, position_max, mit_kp, mit_kd, mit_feedforward);
   }
 
   for (auto & pair : port_to_motors_config_) {
@@ -401,7 +422,11 @@ hardware_interface::return_type DmHW::read(const rclcpp::Time &, const rclcpp::D
 
     const DmActData & updated_data = port_to_motors_config_.at(port).at(can_id);
     const auto & mapping = joint_mappings_[i];
-    raw_physical_pos[i] = motorToPhysical(updated_data.pos, mapping);
+    const double raw_motor_physical_pos = motorToPhysical(updated_data.pos, mapping);
+    const double position_reference = command_filter_initialized_
+      ? filtered_physical_cmd_pos_[i]
+      : urdfToPhysical(hw_actuator_data_[i].pos);
+    raw_physical_pos[i] = wrapAngleNearReference(raw_motor_physical_pos, position_reference);
     raw_physical_vel[i] = motorToPhysicalScalar(updated_data.vel, mapping);
     raw_physical_effort[i] = motorToPhysicalScalar(updated_data.effort, mapping);
 
@@ -442,6 +467,11 @@ hardware_interface::return_type DmHW::read(const rclcpp::Time &, const rclcpp::D
         physical_vel -= raw_physical_vel[ref_it->second];
       }
     }
+
+    const double joint_reference = command_filter_initialized_
+      ? filtered_physical_cmd_pos_[i]
+      : urdfToPhysical(hw_actuator_data_[i].pos);
+    physical_pos = wrapAngleNearReference(physical_pos, joint_reference);
 
     hw_actuator_data_[i].pos = physicalToUrdf(physical_pos);
     hw_actuator_data_[i].vel = physical_vel;
@@ -520,6 +550,26 @@ hardware_interface::return_type DmHW::write(const rclcpp::Time &, const rclcpp::
       desired_kd[i] = hw_actuator_data_[i].kd;
     }
 
+    const auto & mapping = joint_mappings_[i];
+    const double unclamped_pos = desired_physical_pos[i];
+    desired_physical_pos[i] = clampToPositionLimits(desired_physical_pos[i], mapping);
+    if (desired_physical_pos[i] <= mapping.position_min && desired_physical_vel[i] < 0.0) {
+      desired_physical_vel[i] = 0.0;
+    }
+    if (desired_physical_pos[i] >= mapping.position_max && desired_physical_vel[i] > 0.0) {
+      desired_physical_vel[i] = 0.0;
+    }
+    if (std::fabs(desired_physical_pos[i] - unclamped_pos) > 1e-9 && feedback_node_) {
+      RCLCPP_WARN_THROTTLE(
+        rclcpp::get_logger("DmHW"),
+        *feedback_node_->get_clock(),
+        1000,
+        "Clamped command for joint '%s' to software position limit [%.3f, %.3f] rad.",
+        mapping.joint_name.c_str(),
+        mapping.position_min,
+        mapping.position_max);
+    }
+
     if (!command_filter_initialized_) {
       filtered_physical_cmd_pos_[i] = desired_physical_pos[i];
       filtered_physical_cmd_vel_[i] = desired_physical_vel[i];
@@ -552,6 +602,14 @@ hardware_interface::return_type DmHW::write(const rclcpp::Time &, const rclcpp::
         filtered_cmd_kp_[i], desired_kp[i], mit_gain_command_alpha_);
       filtered_cmd_kd_[i] = blendCommandValue(
         filtered_cmd_kd_[i], desired_kd[i], mit_gain_command_alpha_);
+    }
+
+    filtered_physical_cmd_pos_[i] = clampToPositionLimits(filtered_physical_cmd_pos_[i], mapping);
+    if (filtered_physical_cmd_pos_[i] <= mapping.position_min && filtered_physical_cmd_vel_[i] < 0.0) {
+      filtered_physical_cmd_vel_[i] = 0.0;
+    }
+    if (filtered_physical_cmd_pos_[i] >= mapping.position_max && filtered_physical_cmd_vel_[i] > 0.0) {
+      filtered_physical_cmd_vel_[i] = 0.0;
     }
   }
   command_filter_initialized_ = true;

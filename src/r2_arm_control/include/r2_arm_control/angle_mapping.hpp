@@ -13,6 +13,8 @@ struct JointAngleMapping
   double zero_offset_rad {0.0};
   double transmission_ratio {1.0};
   std::string absolute_reference_joint_name;
+  double position_min {-3.14159265358979323846};
+  double position_max {3.14159265358979323846};
 };
 
 inline double sanitizeMotorSign(double configured, double fallback = 1.0)
