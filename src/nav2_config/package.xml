@@ -23,6 +23,8 @@
   <exec_depend>nav2_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>sensor_msgs_py</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>visualization_msgs</exec_depend>
   <exec_depend>vision_msgs</exec_depend>
@@ -36,7 +38,6 @@
   <exec_depend>yesense_std_ros2</exec_depend>
   <exec_depend>vmc_quadruped_controller</exec_depend>
   <exec_depend>yolov11n_rknn</exec_depend>
-
   <export>
     <build_type>ament_cmake</build_type>
   </export>

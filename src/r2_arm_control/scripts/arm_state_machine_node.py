@@ -42,10 +42,12 @@ class ArmStateMachineNode(Node):
 
         self.declare_parameter("joy_topic", "/joy")
         self.declare_parameter("move_service_name", "/r2/arm/move_to_xz")
+        self.declare_parameter("move_service_timeout_sec", 8.0)
         self.declare_parameter(
             "arm_set_parameters_service",
             "/arm_command_server_node/set_parameters",
         )
+        self.declare_parameter("arm_set_parameters_timeout_sec", 3.0)
         self.declare_parameter("gpio_state_topic", "/r2/manual/dpad_down_gpio36_state")
         self.declare_parameter("state_name_topic", "/r2/arm/state_machine_state")
         self.declare_parameter("gpio_number", 36)
@@ -97,8 +99,14 @@ class ArmStateMachineNode(Node):
 
         self.joy_topic = str(self.get_parameter("joy_topic").value)
         self.move_service_name = str(self.get_parameter("move_service_name").value)
+        self.move_service_timeout_sec = float(
+            self.get_parameter("move_service_timeout_sec").value
+        )
         self.arm_set_parameters_service = str(
             self.get_parameter("arm_set_parameters_service").value
+        )
+        self.arm_set_parameters_timeout_sec = float(
+            self.get_parameter("arm_set_parameters_timeout_sec").value
         )
         self.gpio_state_topic = str(self.get_parameter("gpio_state_topic").value)
         self.state_name_topic = str(self.get_parameter("state_name_topic").value)
@@ -192,7 +200,10 @@ class ArmStateMachineNode(Node):
                     "Queued one DPad-down press because the arm state machine is busy."
                 )
             elif not self.startup_sequence_done:
-                self.get_logger().warn("Ignoring DPad-down press because the initial idle sequence is not ready yet.")
+                self.pending_advance_requested = True
+                self.get_logger().warn(
+                    "Queued one DPad-down press until the initial idle sequence is ready."
+                )
             else:
                 next_state = self.next_state_name(self.current_state)
                 self.start_transition(next_state)
@@ -303,6 +314,28 @@ class ArmStateMachineNode(Node):
             return bool(action.before_move)
         return bool(previous_gpio)
 
+    def call_service_with_timeout(
+        self, client, request, timeout_sec: float
+    ) -> tuple[bool, object]:
+        future = client.call_async(request)
+        done_event = threading.Event()
+        future.add_done_callback(lambda _: done_event.set())
+
+        if not done_event.wait(timeout_sec):
+            try:
+                remove_pending_request = getattr(client, "remove_pending_request", None)
+                if callable(remove_pending_request):
+                    remove_pending_request(future)
+            except Exception:
+                pass
+            return False, None
+
+        try:
+            return True, future.result()
+        except Exception as exc:
+            self.get_logger().error(f"Service call failed: {exc}")
+            return True, None
+
     def apply_arm_motion_profile(self, config: ArmStateConfig) -> bool:
         request = SetParameters.Request()
         request.parameters = [
@@ -314,15 +347,22 @@ class ArmStateMachineNode(Node):
             Parameter("kd_joint1", value=config.kd_joint1).to_parameter_msg(),
         ]
 
-        try:
-            response = self.param_client.call(request)
-        except Exception as exc:
-            self.get_logger().error(f"Failed to set arm motion profile parameters: {exc}")
-            return False
+        completed, response = self.call_service_with_timeout(
+            self.param_client, request, self.arm_set_parameters_timeout_sec
+        )
+        if not completed:
+            self.get_logger().warn(
+                "Timed out while updating arm motion profile parameters; "
+                "continuing with the current profile."
+            )
+            return True
 
         if response is None or len(response.results) != len(request.parameters):
-            self.get_logger().error("Arm motion profile parameter update returned an invalid response.")
-            return False
+            self.get_logger().warn(
+                "Arm motion profile parameter update returned an invalid response; "
+                "continuing with the current profile."
+            )
+            return True
 
         failed_reasons = [
             result.reason
@@ -330,10 +370,12 @@ class ArmStateMachineNode(Node):
             if not result.successful
         ]
         if failed_reasons:
-            self.get_logger().error(
-                "Arm motion profile parameter update failed: " + " | ".join(failed_reasons)
+            self.get_logger().warn(
+                "Arm motion profile parameter update failed; "
+                "continuing with the current profile. "
+                + " | ".join(failed_reasons)
             )
-            return False
+            return True
 
         return True
 
@@ -344,10 +386,14 @@ class ArmStateMachineNode(Node):
         request.x = config.x
         request.z = config.z
 
-        try:
-            response = self.move_client.call(request)
-        except Exception as exc:
-            self.get_logger().error(f"Move service call failed for state '{state_name}': {exc}")
+        completed, response = self.call_service_with_timeout(
+            self.move_client, request, self.move_service_timeout_sec
+        )
+        if not completed:
+            self.get_logger().error(
+                f"Move service timed out for state '{state_name}' after "
+                f"{self.move_service_timeout_sec:.1f}s."
+            )
             return False
 
         if response is None:

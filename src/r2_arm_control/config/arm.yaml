@@ -206,8 +206,9 @@ trajectory_execution_timeout_margin_sec: 1.50
 direct_goal_tolerance_rad: 0.02
 
 # 判定“末端已到位”的笛卡尔误差阈值，单位 m。
-# 如果你的目标是末端 1 cm 内，建议保持 0.01。
-cartesian_goal_tolerance_m: 0.01
+# 当前实机在 MIT 原生模式下静止时常有约 1.8 cm 的残余误差，
+# 这里适当放宽，避免状态机反复卡在 startup idle 的最终保持阶段。
+cartesian_goal_tolerance_m: 0.02
 
 # 进入最终保持段后，如果末端仍有残余误差，就按这个比例做小幅超调修正。
 # 值越大修正越积极，过大可能来回摆；建议 0.5~1.0 之间起步。
@@ -287,7 +288,7 @@ trajectory_controller_action_name: /arm_trajectory_controller/follow_joint_traje
 # ------------------------------
 
 # 空闲状态：GPIO36 低电平，回到待机点。
-idle_x: 0.05
+idle_x: 0.16
 idle_z: 0.30
 idle_ee_linear_speed_limit: 0.10
 idle_ee_linear_acc_limit: 0.25
@@ -301,8 +302,8 @@ startup_idle_ee_linear_speed_limit: 0.04
 startup_idle_ee_linear_acc_limit: 0.08
 
 # 吸取状态：先拉高 GPIO36，再移动到吸取点。
-pick_x: 0.35
-pick_z: -0.05
+pick_x: 0.45
+pick_z: -0.10
 pick_ee_linear_speed_limit: 0.10
 pick_ee_linear_acc_limit: 0.25
 pick_kp_joint0: 60.0
@@ -311,7 +312,7 @@ pick_kd_joint0: 2.0
 pick_kd_joint1: 2.0
 
 # 存储状态：保持 GPIO36 高电平，回到存储点。
-store_x: 0.05
+store_x: 0.16
 store_z: 0.30
 store_ee_linear_speed_limit: 0.10
 store_ee_linear_acc_limit: 0.25
@@ -321,8 +322,8 @@ store_kd_joint0: 2.0
 store_kd_joint1: 2.0
 
 # 放置状态：先移动到放置点，到位后再拉低 GPIO36。
-place_x: 0.35
-place_z: -0.05
+place_x: 0.45
+place_z: -0.10
 place_ee_linear_speed_limit: 0.10
 place_ee_linear_acc_limit: 0.25
 place_kp_joint0: 60.0

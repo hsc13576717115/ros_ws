@@ -28,9 +28,9 @@ class Foot_Controller : public rclcpp::Node{
         rclcpp::TimerBase::SharedPtr status_line_timer;
         bool stand_up_flag = false;
         bool ctrl_by_joy = true;
-        const float joy_deadzone = 0.10;
-        const double joy_override_timeout_sec = 0.25;
-        const double auto_cmd_timeout_sec = 0.50;
+        float joy_deadzone = 0.10f;
+        double joy_override_timeout_sec = 0.30;
+        double auto_cmd_timeout_sec = 0.50;
         const double arm_control_period_sec = 0.02;
         const double arm_stick_deadzone = 0.05;
         const double arm_target_vel_x = 0.18;
@@ -75,6 +75,14 @@ class Foot_Controller : public rclcpp::Node{
         Cycloid cycloid;
         VMC_Param params[4];
     public: Foot_Controller(): Node("foot_controller"){
+        this->declare_parameter<double>("joy_deadzone", 0.10);
+        this->declare_parameter<double>("joy_override_timeout_sec", 0.30);
+        this->declare_parameter<double>("auto_cmd_timeout_sec", 0.50);
+
+        joy_deadzone = static_cast<float>(this->get_parameter("joy_deadzone").as_double());
+        joy_override_timeout_sec = this->get_parameter("joy_override_timeout_sec").as_double();
+        auto_cmd_timeout_sec = this->get_parameter("auto_cmd_timeout_sec").as_double();
+
         joy_subscription = this->create_subscription<sensor_msgs::msg::Joy>("joy",10,std::bind(&Foot_Controller::joy_callback,this,std::placeholders::_1));
         move_cmd_subscription = this->create_subscription<vmc_quadruped_controller::msg::MoveCmd>("move_cmd",10,std::bind(&Foot_Controller::move_cmd_callback,this,std::placeholders::_1));
         euler_subscription = this->create_subscription<yesense_interface::msg::EulerOnly>("euler_only",10,std::bind(&Foot_Controller::euler_callback,this,std::placeholders::_1));
@@ -364,10 +372,9 @@ class Foot_Controller : public rclcpp::Node{
             float joy_step_y = -msg->axes[AXES_LY];
             bool joy_motion = (abs(joy_step_x) > joy_deadzone || abs(joy_step_y) > joy_deadzone);
             if (joy_motion) {
-                manual_pause_latched = true;
                 last_joy_motion_time = std::chrono::steady_clock::now();
                 apply_motion_cmd(joy_step_x, joy_step_y);
-            } else if(manual_pause_latched){
+            } else if(manual_pause_latched || is_joy_override_active()){
                 apply_motion_cmd(0, 0);
             } else if(!has_recent_auto_cmd()){
                 apply_motion_cmd(0, 0);

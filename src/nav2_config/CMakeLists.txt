@@ -19,6 +19,7 @@ install(
     scripts/cmd_vel_visualizer.py
     scripts/wait_for_odom_activate_nav2.py
     scripts/preset_waypoint_mission.py
+    scripts/pointcloud_to_scan.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
