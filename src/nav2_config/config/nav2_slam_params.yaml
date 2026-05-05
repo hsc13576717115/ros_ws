@@ -25,11 +25,11 @@ controller_server:
       primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"  # 主路径跟踪器
       angular_dist_threshold: 0.52         # 更早先转向再走，减少四足边走边拧导致的切角
       angular_disengage_threshold: 0.12    # 退出shim时仍保留一定对齐余量，减少反复切换
-      rotate_to_heading_angular_vel: 0.40  # 原地对齐角速度(rad/s)，加快目标点航向对齐
+      rotate_to_heading_angular_vel: 0.24  # 与 velocity_smoother / bridge 对齐，避免上游饱和
       max_angular_accel: 0.35              # 角加速度(rad/s^2)，降低原地修朝向时的过冲
       forward_sampling_distance: 0.30      # 沿路径向前采样距离，用于估算路径方向；不影响 rotate_to_goal_heading
       simulate_ahead_time: 0.6             # 缩短旋转碰撞前瞻时间，避免过度保守
-      rotate_to_goal_heading: true         # 进目标区后只做原地朝向对齐（最短角路径）
+      rotate_to_goal_heading: false        # 禁用 RotationShim 最终朝向对齐，由 cmd_vel_to_move_cmd 的 final_align 独占控制，避免两者打架
       closed_loop: true                    # 用里程计角速度闭环约束旋转过程
 
       desired_linear_vel: 0.20             # 室内平地低速巡航，优先跟踪精度

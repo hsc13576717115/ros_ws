@@ -436,16 +436,16 @@ def generate_launch_description():
             {'base_frame': 'base_link'},
             {'final_align_enabled': True},
             {'final_align_xy_trigger': 0.08},
-            {'final_align_yaw_trigger': 0.18},
-            {'final_align_yaw_exit': 0.08},
+            {'final_align_yaw_trigger': 0.35},                  # 更早进入 final_align，给更多调整时间
+            {'final_align_yaw_exit': 0.04},                     # 约 2.3° 才退出，提高最终朝向精度
             {'final_align_linear_scale': 0.15},
-            {'final_align_max_linear_x': 0.02},
-            {'final_align_angular_kp': 1.2},
-            {'min_nonzero_angular_z': 0.06},                    # 比死区略大，防止末端wz太小不动
+            {'final_align_max_linear_x': 0.0},                  # 完全原地旋转，不再前进
+            {'final_align_angular_kp': 1.5},                    # 略增大，加快收敛同时保留比例调节区间
+            {'min_nonzero_angular_z': 0.08},                    # 增大最小角速度，确保步态能有效响应不原地踏步
             {'min_nonzero_angular_linear_x_threshold': 0.02},   # 更早允许纯转向阶段触发最小角速度
-            {'max_angular_z': 0.24},        # 与 velocity_smoother / RotationShim 对齐
+            {'max_angular_z': 0.24},        # 与 velocity_smoother 对齐
             {'max_angular_z_accel': 0.35},  # 与 velocity_smoother 对齐，避免链路前后限幅打架
-            {'smoothing_alpha': 0.50},      # 保留桥接层平滑，但减少指令迟滞
+            {'smoothing_alpha': 0.30},      # 降低平滑，减少 final_align 阶段的指令迟滞
             {'max_step_x_rate': 2.4},       # 适度提高转向步态指令响应
             {'max_step_y_rate': 2.0},       # 适度提高直行步态指令响应
         ]
