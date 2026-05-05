@@ -1,12 +1,14 @@
 # Static TF configuration for SLAM
-# Defines the fixed transformations between robot base and sensors
+# Defines the fixed transformations between the raw SLAM body frame and sensors.
+# ROS navigation uses the corrected base_link child:
+# base_link_raw -> base_link, where base_link +x is robot front and +y is robot left.
 
-# base_link -> laser (N10P LiDAR)
+# base_link_raw -> laser (N10P LiDAR)
 tf_laser:
   ros__parameters:
-    frame_id: base_link
+    frame_id: base_link_raw
     child_frame_id: laser
-    x: 0.0      # LiDAR at robot geometric center (front/back centered)
+    x: -0.12102 # LiDAR is mounted 121.02mm behind the robot geometric center
     y: 0.0      # Centered laterally
     z: 0.2      # 20cm height from ground
     qx: 0.0
@@ -14,10 +16,10 @@ tf_laser:
     qz: 0.0
     qw: 1.0
 
-# base_link -> gyro_link (IMU)
+# base_link_raw -> gyro_link (IMU)
 tf_imu:
   ros__parameters:
-    frame_id: base_link
+    frame_id: base_link_raw
     child_frame_id: gyro_link
     x: 0.0      # IMU at robot center
     y: 0.0

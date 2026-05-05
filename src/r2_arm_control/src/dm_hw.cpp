@@ -341,11 +341,12 @@ hardware_interface::CallbackReturn DmHW::on_activate(const rclcpp_lifecycle::Sta
     }
 
     if (!switched_ok) {
-      RCLCPP_ERROR(
+      RCLCPP_FATAL(
         rclcpp::get_logger("DmHW"),
         "Failed to switch all motors on port %s to MIT_MODE after retries. "
-        "Keeping ros2_control alive; arm state may stay stale until communication recovers.",
+        "Hardware activation aborted to prevent silent command rejection.",
         port_name.c_str());
+      return hardware_interface::CallbackReturn::ERROR;
     }
 
     try {

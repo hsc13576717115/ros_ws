@@ -155,7 +155,10 @@ int LSIOSR::read(unsigned char *buffer, int length, int timeout)
       }
       else if (rc < 0)
       {
-        printf("error \n");
+        if (errno != EINTR && errno != EAGAIN)
+        {
+          printf("read error: %s\n", strerror(errno));
+        }
         retry--;
         if (retry <= 0)
         {
@@ -365,7 +368,7 @@ int LSIOSR::init()
 {
 	int error_code = 0;
 		
-	fd_ = open(port_.c_str(), O_RDWR|O_NOCTTY|O_NDELAY);
+	fd_ = open(port_.c_str(), O_RDWR | O_NOCTTY);
 	if (0 < fd_)
 	{
 		error_code = 0;

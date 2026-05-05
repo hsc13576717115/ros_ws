@@ -83,6 +83,7 @@ private:
     void recvThread_crc(int &count,int &link_time);
     int receive_data(unsigned char *packet_bytes);
     int getScan(std::vector<ScanPoint> &points, rclcpp::Time &scan_time, float &scan_duration);
+    bool isPointInsideSelfFilter(double range, double angle_rad) const;
 
     boost::thread *pubscan_thread_ ;
     boost::shared_ptr<Input> msop_input_;
@@ -108,9 +109,18 @@ private:
     bool first_compensation = true;
     bool pubScan;
     bool pubPointCloud2;
+    bool self_filter_enabled;
 
     double min_range;
     double max_range;
+    double self_filter_laser_x;
+    double self_filter_laser_y;
+    double self_filter_laser_yaw_deg;
+    double self_filter_radius;
+    double self_filter_min_x;
+    double self_filter_max_x;
+    double self_filter_min_y;
+    double self_filter_max_y;
     double angle_disable_min;
     double angle_disable_max;
     double angle_able_min;

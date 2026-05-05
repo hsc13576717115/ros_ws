@@ -179,7 +179,7 @@ Visualization Manager:
     - Buffer Length: 1
       Class: rviz_default_plugins/Path
       Color: 255; 255; 0
-      Enabled: true
+      Enabled: false
       Head Diameter: 0.25
       Head Length: 0.15
       Length: 0.3
@@ -201,16 +201,25 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /preset_route
-      Value: true
+      Value: false
 
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
-      Name: Preset Waypoints
+      Name: Field Reference
       Namespaces:
-        preset_current_goal: true
-        preset_route: true
-        preset_waypoint_text: true
-        preset_waypoints: true
+        preset_current_goal: false
+        preset_route: false
+        preset_waypoint_text: false
+        preset_waypoints: false
+        task_field_boundary: true
+        task_field_dimension_text: true
+        task_field_floor: true
+        task_field_place_zones: true
+        task_field_speed_bump: true
+        task_field_start: true
+        task_field_storage_zones: true
+        task_field_text: true
+        task_field_wall: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -224,7 +233,7 @@ Visualization Manager:
       Axes Radius: 0.08
       Class: rviz_default_plugins/Pose
       Color: 255; 64; 64
-      Enabled: true
+      Enabled: false
       Head Length: 0.25
       Head Radius: 0.1
       Length: 0.65
@@ -238,7 +247,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /preset_current_goal
-      Value: true
+      Value: false
 
     - Alpha: 1
       Axes Length: 0.5
@@ -329,20 +338,22 @@ Visualization Manager:
       Value: true
 
     - Class: rviz_default_plugins/TF
-      Enabled: true
+      Enabled: false
       Frame Timeout: 15
       Frames:
-        All Enabled: true
+        All Enabled: false
         base_link:
           Value: true
+        base_link_raw:
+          Value: false
         gyro_link:
-          Value: true
+          Value: false
         laser:
-          Value: true
+          Value: false
         map:
           Value: true
         odom:
-          Value: true
+          Value: false
       Marker Scale: 1
       Name: TF
       Show Arrows: true
@@ -351,18 +362,19 @@ Visualization Manager:
       Tree:
         map:
           odom:
-            base_link:
+            base_link_raw:
+              base_link:
               gyro_link:
               laser:
       Update Interval: 0
-      Value: true
+      Value: false
 
     - Alpha: 1
       Axes Length: 0.8
       Axes Radius: 0.1
       Class: rviz_default_plugins/Pose
       Color: 0; 255; 0
-      Enabled: true
+      Enabled: false
       Head Length: 0.3
       Head Radius: 0.1
       Length: 0.8
@@ -376,7 +388,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /robot_pose
-      Value: true
+      Value: false
 
     - Class: rviz_default_plugins/Axes
       Enabled: true
@@ -387,12 +399,12 @@ Visualization Manager:
       Value: true
 
     - Class: rviz_default_plugins/Axes
-      Enabled: true
+      Enabled: false
       Length: 0.3
       Name: laser
       Radius: 0.03
       Reference Frame: laser
-      Value: true
+      Value: false
 
   Enabled: true
   Global Options:

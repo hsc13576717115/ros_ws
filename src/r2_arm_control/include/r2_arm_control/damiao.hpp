@@ -234,6 +234,7 @@ private:
   };
 
   void WriteData(const can_send_frame & frame);
+  void log_write_error(const std::string & message);
   bool ReadData(CAN_Receive_Frame & frame, size_t timeout_ms = 100);
   void control_cmd(MotorId id, uint8_t cmd);
   void write_motor_param(Motor & motor, uint8_t rid, const uint8_t data[4]);
@@ -282,6 +283,7 @@ private:
   std::string socketcan_interface_name_;
   std::chrono::duration<double> read_error_log_interval_ {0.5};
   std::chrono::steady_clock::time_point last_receive_diag_log_time_ {};
+  std::chrono::steady_clock::time_point last_write_error_log_time_ {};
   std::size_t receive_ok_count_ {0};
   std::size_t receive_timeout_count_ {0};
   std::size_t receive_invalid_frame_count_ {0};

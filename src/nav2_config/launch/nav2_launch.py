@@ -52,6 +52,50 @@ def generate_launch_description():
         description='Start yesense IMU driver in this launch (set false when dog.launch is already running)'
     )
 
+    imu_roll_arg = DeclareLaunchArgument(
+        'imu_roll_deg',
+        default_value='0.0',
+        description='Static TF roll from base_link to gyro_link (degrees)'
+    )
+
+    imu_pitch_arg = DeclareLaunchArgument(
+        'imu_pitch_deg',
+        default_value='0.0',
+        description='Static TF pitch from base_link to gyro_link (degrees)'
+    )
+
+    imu_yaw_arg = DeclareLaunchArgument(
+        'imu_yaw_deg',
+        default_value='0.0',
+        description='Static TF yaw from base_link_raw to gyro_link (degrees)'
+    )
+
+    laser_yaw_arg = DeclareLaunchArgument(
+        'laser_yaw_deg',
+        default_value='0.0',
+        description='Static TF yaw from base_link_raw to laser (degrees)'
+    )
+    laser_x_arg = DeclareLaunchArgument(
+        'laser_x',
+        default_value='-0.12102',
+        description='Static TF x from base_link to laser (meters)'
+    )
+    laser_y_arg = DeclareLaunchArgument(
+        'laser_y',
+        default_value='0.0',
+        description='Static TF y from base_link to laser (meters)'
+    )
+    laser_z_arg = DeclareLaunchArgument(
+        'laser_z',
+        default_value='0.2',
+        description='Static TF z from base_link to laser (meters)'
+    )
+    body_yaw_arg = DeclareLaunchArgument(
+        'body_yaw_deg',
+        default_value='90.0',
+        description='Static TF yaw from base_link_raw to corrected base_link (degrees)'
+    )
+
     cmd_invert_linear_x_arg = DeclareLaunchArgument(
         'cmd_invert_linear_x',
         default_value='true',
@@ -82,7 +126,17 @@ def generate_launch_description():
     tf_static = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
             PathJoinSubstitution([slam_config_dir, 'launch', 'tf_static_launch.py'])
-        ])
+        ]),
+        launch_arguments={
+            'imu_roll_deg': LaunchConfiguration('imu_roll_deg'),
+            'imu_pitch_deg': LaunchConfiguration('imu_pitch_deg'),
+            'imu_yaw_deg': LaunchConfiguration('imu_yaw_deg'),
+            'laser_yaw_deg': LaunchConfiguration('laser_yaw_deg'),
+            'laser_x': LaunchConfiguration('laser_x'),
+            'laser_y': LaunchConfiguration('laser_y'),
+            'laser_z': LaunchConfiguration('laser_z'),
+            'body_yaw_deg': LaunchConfiguration('body_yaw_deg'),
+        }.items(),
     )
 
     yesense_launch = IncludeLaunchDescription(
@@ -104,7 +158,12 @@ def generate_launch_description():
         emulate_tty=True,
         parameters=[
             os.path.join(get_package_share_directory('lslidar_driver'), 'params', 'lidar_uart_ros2', 'lsn10p.yaml'),
-            {'use_sim_time': LaunchConfiguration('use_sim_time')}
+            {
+                'use_sim_time': LaunchConfiguration('use_sim_time'),
+                'self_filter_laser_x': LaunchConfiguration('laser_x'),
+                'self_filter_laser_y': LaunchConfiguration('laser_y'),
+                'self_filter_laser_yaw_deg': LaunchConfiguration('laser_yaw_deg'),
+            }
         ],
     )
 
@@ -289,6 +348,14 @@ def generate_launch_description():
         autostart_arg,
         map_arg,
         start_imu_arg,
+        imu_roll_arg,
+        imu_pitch_arg,
+        imu_yaw_arg,
+        laser_yaw_arg,
+        laser_x_arg,
+        laser_y_arg,
+        laser_z_arg,
+        body_yaw_arg,
         cmd_invert_linear_x_arg,
         cmd_invert_angular_z_arg,
         params_file_arg,

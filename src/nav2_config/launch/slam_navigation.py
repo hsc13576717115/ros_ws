@@ -15,7 +15,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node, LifecycleNode
 
 
@@ -70,13 +70,51 @@ def generate_launch_description():
     imu_yaw_arg = DeclareLaunchArgument(
         'imu_yaw_deg',
         default_value='0.0',
-        description='Static TF yaw from base_link to gyro_link (degrees)'
+        description='Static TF yaw from base_link_raw to gyro_link (degrees)'
+    )
+
+    laser_yaw_arg = DeclareLaunchArgument(
+        'laser_yaw_deg',
+        default_value='0.0',
+        description='Static TF yaw from base_link_raw to laser (degrees)'
+    )
+    laser_x_arg = DeclareLaunchArgument(
+        'laser_x',
+        default_value='-0.12102',
+        description='Static TF x from base_link to laser (meters)'
+    )
+    laser_y_arg = DeclareLaunchArgument(
+        'laser_y',
+        default_value='0.0',
+        description='Static TF y from base_link to laser (meters)'
+    )
+    laser_z_arg = DeclareLaunchArgument(
+        'laser_z',
+        default_value='0.2',
+        description='Static TF z from base_link to laser (meters)'
+    )
+    body_yaw_arg = DeclareLaunchArgument(
+        'body_yaw_deg',
+        default_value='90.0',
+        description='Static TF yaw from base_link_raw to corrected base_link (degrees)'
     )
 
     start_preset_mission_arg = DeclareLaunchArgument(
         'start_preset_mission',
         default_value='false',
         description='Start preset multi-waypoint mission node'
+    )
+
+    start_field_reference_arg = DeclareLaunchArgument(
+        'start_field_reference',
+        default_value='true',
+        description='Show the rule-based task-field reference overlay in RViz'
+    )
+
+    show_task_item_zones_arg = DeclareLaunchArgument(
+        'show_task_item_zones',
+        default_value='true',
+        description='Show storage/place-zone blocks in the field reference overlay'
     )
 
     start_yolo_arg = DeclareLaunchArgument(
@@ -140,6 +178,11 @@ def generate_launch_description():
             'imu_roll_deg': LaunchConfiguration('imu_roll_deg'),
             'imu_pitch_deg': LaunchConfiguration('imu_pitch_deg'),
             'imu_yaw_deg': LaunchConfiguration('imu_yaw_deg'),
+            'laser_yaw_deg': LaunchConfiguration('laser_yaw_deg'),
+            'laser_x': LaunchConfiguration('laser_x'),
+            'laser_y': LaunchConfiguration('laser_y'),
+            'laser_z': LaunchConfiguration('laser_z'),
+            'body_yaw_deg': LaunchConfiguration('body_yaw_deg'),
         }.items(),
     )
 
@@ -183,7 +226,12 @@ def generate_launch_description():
         emulate_tty=True,
         parameters=[
             os.path.join(get_package_share_directory('lslidar_driver'), 'params', 'lidar_uart_ros2', 'lsn10p.yaml'),
-            {'use_sim_time': LaunchConfiguration('use_sim_time')}
+            {
+                'use_sim_time': LaunchConfiguration('use_sim_time'),
+                'self_filter_laser_x': LaunchConfiguration('laser_x'),
+                'self_filter_laser_y': LaunchConfiguration('laser_y'),
+                'self_filter_laser_yaw_deg': LaunchConfiguration('laser_yaw_deg'),
+            }
         ],
     )
 
@@ -415,11 +463,17 @@ def generate_launch_description():
         executable='preset_waypoint_mission.py',
         name='preset_waypoint_mission',
         output='screen',
-        condition=IfCondition(LaunchConfiguration('start_preset_mission')),
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('start_field_reference'), "' == 'true' or '",
+            LaunchConfiguration('start_preset_mission'), "' == 'true'"
+        ])),
         parameters=[
             {'waypoint_file': LaunchConfiguration('waypoint_file')},
+            {'auto_start': LaunchConfiguration('start_preset_mission')},
             {'loop_mission': LaunchConfiguration('preset_mission_loop')},
             {'frame_id': 'map'},
+            {'publish_field_layout': LaunchConfiguration('start_field_reference')},
+            {'publish_task_item_zones': LaunchConfiguration('show_task_item_zones')},
         ]
     )
 
@@ -444,7 +498,14 @@ def generate_launch_description():
         imu_roll_arg,
         imu_pitch_arg,
         imu_yaw_arg,
+        laser_yaw_arg,
+        laser_x_arg,
+        laser_y_arg,
+        laser_z_arg,
+        body_yaw_arg,
         start_preset_mission_arg,
+        start_field_reference_arg,
+        show_task_item_zones_arg,
         start_yolo_arg,
         yolo_show_detection_arg,
         yolo_publish_image_arg,

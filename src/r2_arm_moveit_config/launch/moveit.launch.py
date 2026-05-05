@@ -167,7 +167,7 @@ def _launch_setup(context, *args, **kwargs):
     )
 
     delayed_move_group_node = TimerAction(period=8.0, actions=[move_group_node])
-    delayed_move_to_xz_service_node = TimerAction(period=12.0, actions=[move_to_xz_service_node])
+    delayed_move_to_xz_service_node = TimerAction(period=3.0, actions=[move_to_xz_service_node])
 
     actions = [
         control_bringup,

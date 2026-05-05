@@ -25,9 +25,9 @@ controller_server:
       primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"  # 主路径跟踪器
       angular_dist_threshold: 0.52         # 更早先转向再走，减少四足边走边拧导致的切角
       angular_disengage_threshold: 0.12    # 退出shim时仍保留一定对齐余量，减少反复切换
-      rotate_to_heading_angular_vel: 0.24  # 原地对齐角速度(rad/s)，与桥接层限幅保持一致
+      rotate_to_heading_angular_vel: 0.40  # 原地对齐角速度(rad/s)，加快目标点航向对齐
       max_angular_accel: 0.35              # 角加速度(rad/s^2)，降低原地修朝向时的过冲
-      forward_sampling_distance: 0.30      # 缩短前向采样距离，低速小空间中更稳
+      forward_sampling_distance: 0.30      # 沿路径向前采样距离，用于估算路径方向；不影响 rotate_to_goal_heading
       simulate_ahead_time: 0.6             # 缩短旋转碰撞前瞻时间，避免过度保守
       rotate_to_goal_heading: true         # 进目标区后只做原地朝向对齐（最短角路径）
       closed_loop: true                    # 用里程计角速度闭环约束旋转过程
@@ -58,10 +58,12 @@ controller_server:
       movement_time_allowance: 20.0         # 给四足低速精确调整更多时间
 
     goal_checker:
-      plugin: "nav2_controller::SimpleGoalChecker"  # 到点检查器实现
-      xy_goal_tolerance: 0.20               # 位置进入该范围后，不再回退到位置检查
-      yaw_goal_tolerance: 0.30              # 朝向容差，先保证稳定收敛，后续再按实机收紧
-      stateful: true                        # 一旦进入xy容忍就不再回退xy检查，只做朝向修正
+      plugin: "nav2_controller::StoppedGoalChecker"  # 要求速度接近零才算到达，防止旋转中被误判
+      xy_goal_tolerance: 0.10               # 收紧位置容差
+      yaw_goal_tolerance: 0.05              # 收紧朝向容差到 ~2.9°
+      stateful: true
+      trans_stopped_velocity: 0.10          # 线速度 < 10cm/s 才算停止
+      rot_stopped_velocity: 0.10            # 角速度 < 0.1 rad/s 才算停止
 
 planner_server:
   ros__parameters:
@@ -69,25 +71,10 @@ planner_server:
     use_sim_time: false                     # 是否使用仿真时间
     planner_plugins: ["GridBased"]          # 全局规划插件列表
     GridBased:
-      plugin: "nav2_smac_planner/SmacPlannerHybrid"  # Smac Hybrid A* 规划器
-      tolerance: 0.10                       # 将近目标容差收紧，避免规划在目标附近找“替代终点”
-      downsample_costmap: false
-      downsampling_factor: 1
-      allow_unknown: true                   # 是否允许穿过未知区域
-      max_iterations: 1000000
-      max_on_approach_iterations: 300
-      max_planning_time: 2.0
-      motion_model_for_search: "DUBIN"
-      angle_quantization_bins: 72
-      minimum_turning_radius: 0.25
-      reverse_penalty: 2.0
-      change_penalty: 0.0
-      non_straight_penalty: 1.20
-      cost_penalty: 2.0
-      retrospective_penalty: 0.015
-      analytic_expansion_ratio: 3.5
-      analytic_expansion_max_length: 1.2
-      smooth_path: true
+      plugin: "nav2_navfn_planner/NavfnPlanner"  # 2D A* 网格规划器，避免 Hybrid/Dubin 生成大弧线
+      tolerance: 0.05                       # 目标点附近容差，减少替代终点
+      use_astar: true                       # 使用 A*，开放区域更接近直线路径
+      allow_unknown: true                   # SLAM 初期允许穿过未知区域
 
 smoother_server:
   ros__parameters:
@@ -191,13 +178,13 @@ local_costmap:
       width: 3                              # 局部地图宽度(m)
       height: 3                             # 局部地图高度(m)
       resolution: 0.05                      # 地图分辨率(m/格)
-      footprint: "[[0.4, 0.225], [0.4, -0.225], [-0.4, -0.225], [-0.4, 0.225]]"  # 机器人足迹多边形（长0.8m，宽0.45m，中心对称）
+      footprint: "[[0.400, 0.227], [0.400, -0.227], [-0.400, -0.227], [-0.400, 0.227]]"  # 机体 800mm x 454mm，base_link 位于机体中心
       plugins: ["voxel_layer", "inflation_layer"]   # 局部地图启用插件
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"   # 障碍膨胀层
         cost_scaling_factor: 2.5                    # 膨胀代价衰减系数 - 降低梯度陡度
-        inflation_radius: 0.3                      # 膨胀半径(m)，减小膨胀范围同时保持大于机体内切半径
+        inflation_radius: 0.30                     # 膨胀半径(m)，必须 >= footprint 内切半径 0.237m
 
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"       # 三维体素障碍层（用激光更新）
@@ -217,9 +204,9 @@ local_costmap:
           marking: true                             # 是否标障
           data_type: "LaserScan"                    # 观测数据类型
           raytrace_max_range: 3.0                   # 清障射线最大距离(m)
-          raytrace_min_range: 0.46                  # 清障射线最小距离(m) - 覆盖 footprint 外接半径，忽略机体轮廓内点云
+          raytrace_min_range: 0.20                  # 自身点已在雷达驱动中过滤，这里保留近距离清障能力
           obstacle_max_range: 2.5                   # 标障最大距离(m)
-          obstacle_min_range: 0.46                  # 标障最小距离(m) - 覆盖 footprint 外接半径，忽略机体轮廓内点云
+          obstacle_min_range: 0.20                  # 自身点已在雷达驱动中过滤，这里保留近距离障碍感知
 
       always_send_full_costmap: False               # 改为增量更新，降低 RViz 和 DDS 负载
 
@@ -231,9 +218,9 @@ global_costmap:
       global_frame: map                             # 全局地图坐标系（map）
       robot_base_frame: base_link                   # 机器人基座坐标系
       use_sim_time: false                           # 是否使用仿真时间
-      footprint: "[[0.4, 0.225], [0.4, -0.225], [-0.4, -0.225], [-0.4, 0.225]]"  # 机器人足迹多边形（长0.8m，宽0.45m，中心对称）
+      footprint: "[[0.400, 0.227], [0.400, -0.227], [-0.400, -0.227], [-0.400, 0.227]]"  # 机体 800mm x 454mm，base_link 位于机体中心
       resolution: 0.05                              # 地图分辨率(m/格)
-      track_unknown_space: true                     # 是否保留未知区域
+      track_unknown_space: false                    # 未知区域按可通行处理，避免 SLAM 初期绕未知区
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]  # 全局地图插件
 
       static_layer:
@@ -252,14 +239,14 @@ global_costmap:
           marking: true                             # 是否标障
           data_type: "LaserScan"                    # 观测数据类型
           raytrace_max_range: 12.0                  # 清障射线最大距离(m)
-          raytrace_min_range: 0.46                  # 清障射线最小距离(m) - 覆盖 footprint 外接半径，忽略机体轮廓内点云
+          raytrace_min_range: 0.20                  # 自身点已在雷达驱动中过滤，这里保留近距离清障能力
           obstacle_max_range: 12.0                  # 标障最大距离(m)
-          obstacle_min_range: 0.46                  # 标障最小距离(m) - 覆盖 footprint 外接半径，忽略机体轮廓内点云
+          obstacle_min_range: 0.20                  # 自身点已在雷达驱动中过滤，这里保留近距离障碍感知
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"   # 膨胀层
         cost_scaling_factor: 2.5                    # 膨胀代价衰减系数 - 降低梯度陡度
-        inflation_radius: 0.3                      # 膨胀半径(m)，减小膨胀范围同时保持大于机体内切半径
+        inflation_radius: 0.30                     # 膨胀半径(m)，必须 >= footprint 内切半径 0.237m
 
       always_send_full_costmap: False               # 改为增量更新，降低 RViz 和 DDS 负载
 

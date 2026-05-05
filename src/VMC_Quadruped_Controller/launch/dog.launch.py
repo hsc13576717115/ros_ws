@@ -35,18 +35,35 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'start_arm',
-            default_value='true',
+            default_value='false',
         ),
         DeclareLaunchArgument(
             'start_dpad_gpio',
+            default_value='false',
+        ),
+        DeclareLaunchArgument(
+            'start_joy',
             default_value='true',
+        ),
+        DeclareLaunchArgument(
+            'start_body',
+            default_value='true',
+        ),
+        DeclareLaunchArgument(
+            'start_imu',
+            default_value='true',
+        ),
+        DeclareLaunchArgument(
+            'imu_pitch_sign',
+            default_value='1.0',
         ),
         Node(
             package='joy',
             executable='joy_node',
             parameters=[{
                 'autorepeat_rate': 0.0,
-            }]
+            }],
+            condition=IfCondition(LaunchConfiguration('start_joy')),
         ),
         Node(
             package='yesense_std_ros2',
@@ -54,16 +71,21 @@ def generate_launch_description():
             name='yesense_pub',
             parameters=[imu_config],
             output='screen',
+            condition=IfCondition(LaunchConfiguration('start_imu')),
         ),
         Node(
             package='vmc_quadruped_controller',
             executable='foots',
-            output='screen'
+            output='screen',
+            parameters=[{
+                'imu_pitch_sign': LaunchConfiguration('imu_pitch_sign'),
+            }],
+            condition=IfCondition(LaunchConfiguration('start_body')),
         ),
         Node(
             package='r2_arm_control',
             executable='arm_state_machine_node.py',
-            output='log',
+            output='screen',
             parameters=[arm_config],
             condition=IfCondition(LaunchConfiguration('start_dpad_gpio')),
         ),

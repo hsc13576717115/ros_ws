@@ -15,7 +15,7 @@ from rclpy.parameter import Parameter
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool, String
 
-from r2_arm_control.srv import MoveToXZ
+from r2_arm_control.srv import MoveToXZ, SetArmState
 
 
 @dataclass(frozen=True)
@@ -48,6 +48,7 @@ class ArmStateMachineNode(Node):
         )
         self.declare_parameter("gpio_state_topic", "/r2/manual/dpad_down_gpio36_state")
         self.declare_parameter("state_name_topic", "/r2/arm/state_machine_state")
+        self.declare_parameter("set_state_service_name", "/r2/arm/set_state")
         self.declare_parameter("gpio_number", 36)
         self.declare_parameter("trigger_axis", 7)
         self.declare_parameter("trigger_threshold", -0.5)
@@ -67,6 +68,8 @@ class ArmStateMachineNode(Node):
         self.declare_parameter("idle_kd_joint1", 2.0)
         self.declare_parameter("startup_idle_ee_linear_speed_limit", 0.04)
         self.declare_parameter("startup_idle_ee_linear_acc_limit", 0.08)
+        self.declare_parameter("transition_via_x", 0.35)
+        self.declare_parameter("transition_via_z", 0.30)
 
         self.declare_parameter("pick_x", 0.35)
         self.declare_parameter("pick_z", -0.05)
@@ -102,6 +105,9 @@ class ArmStateMachineNode(Node):
         )
         self.gpio_state_topic = str(self.get_parameter("gpio_state_topic").value)
         self.state_name_topic = str(self.get_parameter("state_name_topic").value)
+        self.set_state_service_name = str(
+            self.get_parameter("set_state_service_name").value
+        )
         self.gpio_number = int(self.get_parameter("gpio_number").value)
         self.trigger_axis = int(self.get_parameter("trigger_axis").value)
         self.trigger_threshold = float(self.get_parameter("trigger_threshold").value)
@@ -114,6 +120,15 @@ class ArmStateMachineNode(Node):
         self.gpio_root = Path(str(self.get_parameter("gpio_root").value))
 
         self.state_sequence = ["idle", "pick", "store", "place"]
+
+        self.declare_parameter("auto_chain_states", ["pick", "place"])
+        self.declare_parameter("auto_chain_delay_sec", 0.5)
+        raw_auto_chain = self.get_parameter("auto_chain_states").value
+        self.auto_chain_states = [str(s).strip().lower() for s in raw_auto_chain]
+        self.auto_chain_delay_sec = max(
+            0.1, float(self.get_parameter("auto_chain_delay_sec").value)
+        )
+
         self.state_configs = {
             state_name: self.load_state_config(state_name)
             for state_name in self.state_sequence
@@ -132,6 +147,8 @@ class ArmStateMachineNode(Node):
             kd_joint0=self.state_configs["idle"].kd_joint0,
             kd_joint1=self.state_configs["idle"].kd_joint1,
         )
+        self.transition_via_x = float(self.get_parameter("transition_via_x").value)
+        self.transition_via_z = float(self.get_parameter("transition_via_z").value)
         self.gpio_actions: Dict[str, GpioAction] = {
             "idle": GpioAction(before_move=False, after_move=None),
             "pick": GpioAction(before_move=True, after_move=None),
@@ -145,15 +162,25 @@ class ArmStateMachineNode(Node):
 
         self.move_client = self.create_client(MoveToXZ, self.move_service_name)
         self.param_client = self.create_client(SetParameters, self.arm_set_parameters_service)
+        self.set_state_service = self.create_service(
+            SetArmState,
+            self.set_state_service_name,
+            self.set_state_callback,
+        )
 
         self.current_state = "idle"
         self.previous_trigger_pressed = False
         self.logical_high = self.steady_gpio_for_state(self.current_state)
         self.busy = False
-        self.startup_sequence_done = False
+        self.startup_sequence_done = not self.auto_enter_idle_on_start
         self.pending_advance_requested = False
         self.transition_lock = threading.Lock()
         self.last_wait_log_time = 0.0
+        self.last_move_error = ""
+
+        self.auto_chain_pending = False
+        self.auto_chain_target = ""
+        self.auto_chain_timer = None
 
         self.gpio_path = self.gpio_root / f"gpio{self.gpio_number}"
         self.direction_path = self.gpio_path / "direction"
@@ -166,6 +193,13 @@ class ArmStateMachineNode(Node):
 
         self.publish_state_name()
         self.startup_timer = self.create_timer(0.5, self.ensure_idle_state_on_startup)
+        self.get_logger().info(
+            "Arm state machine ready. sequence=idle->pick->store->place->idle, "
+            f"transition_via=({self.transition_via_x:.3f}, {self.transition_via_z:.3f}), "
+            f"auto_enter_idle_on_start={self.auto_enter_idle_on_start}, "
+            f"auto_chain_states={self.auto_chain_states}, "
+            f"auto_chain_delay_sec={self.auto_chain_delay_sec:.1f}"
+        )
 
     def load_state_config(self, state_name: str) -> ArmStateConfig:
         return ArmStateConfig(
@@ -186,15 +220,21 @@ class ArmStateMachineNode(Node):
     def joy_callback(self, msg: Joy) -> None:
         trigger_pressed = self.read_axis_trigger(msg)
         if trigger_pressed and not self.previous_trigger_pressed:
-            if self.busy:
-                self.pending_advance_requested = True
+            if self.auto_chain_pending:
                 self.get_logger().warn(
-                    "Queued one DPad-down press because the arm state machine is busy."
+                    f"Ignoring DPad-down press because auto-chain to '{self.auto_chain_target}' is pending."
+                )
+            elif self.busy:
+                self.get_logger().warn(
+                    "Ignoring DPad-down press because the arm state machine is busy."
                 )
             elif not self.startup_sequence_done:
                 self.get_logger().warn("Ignoring DPad-down press because the initial idle sequence is not ready yet.")
             else:
                 next_state = self.next_state_name(self.current_state)
+                self.get_logger().info(
+                    f"DPad-down pressed: {self.current_state} -> {next_state}"
+                )
                 self.start_transition(next_state)
         self.previous_trigger_pressed = trigger_pressed
 
@@ -217,7 +257,12 @@ class ArmStateMachineNode(Node):
         return False
 
     def ensure_idle_state_on_startup(self) -> None:
-        if not self.auto_enter_idle_on_start or self.startup_sequence_done or self.busy:
+        if (
+            not self.auto_enter_idle_on_start
+            or self.startup_sequence_done
+            or self.busy
+            or self.auto_chain_pending
+        ):
             return
         self.start_transition("idle", is_startup=True)
 
@@ -229,64 +274,187 @@ class ArmStateMachineNode(Node):
         )
         worker.start()
 
-    def run_transition(self, target_state: str, is_startup: bool) -> None:
+    def set_state_callback(
+        self,
+        request: SetArmState.Request,
+        response: SetArmState.Response,
+    ) -> SetArmState.Response:
+        target_state = str(request.state).strip().lower()
+        if target_state not in self.state_sequence:
+            message = (
+                f"Unknown arm state '{target_state}'. "
+                f"Valid states: {', '.join(self.state_sequence)}"
+            )
+            self.get_logger().error(message)
+            response.accepted = False
+            response.state = self.current_state
+            response.message = message
+            return response
+
+        if self.auto_chain_pending:
+            message = (
+                f"Arm state machine is pending auto-chain to '{self.auto_chain_target}'. "
+                f"Please wait until it finishes."
+            )
+            self.get_logger().warn(message)
+            response.accepted = False
+            response.state = self.current_state
+            response.message = message
+            return response
+
+        if self.busy:
+            message = "Arm state machine is busy."
+            self.get_logger().warn(message)
+            response.accepted = False
+            response.state = self.current_state
+            response.message = message
+            return response
+
+        self.start_transition(target_state)
+        message = f"Arm state transition accepted: {target_state}"
+        response.accepted = True
+        response.state = self.current_state
+        response.message = message
+        return response
+
+    def run_transition(self, target_state: str, is_startup: bool) -> tuple[bool, str]:
+        if target_state not in self.state_sequence:
+            message = (
+                f"Unknown arm state '{target_state}'. "
+                f"Valid states: {', '.join(self.state_sequence)}"
+            )
+            self.get_logger().error(message)
+            return False, message
+
         with self.transition_lock:
             if self.busy:
-                return
+                message = "Arm state machine is busy."
+                self.get_logger().warn(message)
+                return False, message
             self.busy = True
 
+        success = False
+        message = ""
         try:
-            previous_state = self.current_state
             previous_gpio = self.logical_high
             action = self.gpio_actions[target_state]
             transition_config = self.transition_config(target_state, is_startup)
-            transition_gpio = self.transition_gpio_state(previous_gpio, action)
 
             if not self.services_ready():
                 now_sec = time.monotonic()
-                if now_sec - self.last_wait_log_time >= 5.0:
+                if now_sec - self.last_wait_log_time >= 2.0:
+                    move_ready = self.move_client.wait_for_service(timeout_sec=0.1)
+                    param_ready = self.param_client.wait_for_service(timeout_sec=0.1)
+                    missing = []
+                    if not move_ready:
+                        missing.append("/r2/arm/move_to_xz")
+                    if not param_ready:
+                        missing.append("/arm_command_server_node/set_parameters")
                     self.get_logger().warn(
-                        "Arm state machine is waiting for move service and parameter service."
+                        f"Arm state machine waiting for services: {', '.join(missing)}. "
+                        f"DPad-down is disabled until idle init succeeds."
                     )
                     self.last_wait_log_time = now_sec
-                return
+                message = "Move service or parameter service is not ready."
+            else:
+                if is_startup and target_state == "idle":
+                    self.get_logger().info(
+                        "Startup safe-idle move: returning to idle coordinates with reduced speed."
+                    )
 
-            if is_startup and target_state == "idle":
-                self.get_logger().info(
-                    "Startup safe-idle move: returning to idle coordinates with reduced speed."
-                )
+                if action.before_move is not None:
+                    self.apply_output(action.before_move)
 
-            if action.before_move is not None:
-                self.apply_output(action.before_move)
+                skip_transition_via = is_startup and target_state == "idle"
 
-            if not self.apply_arm_motion_profile(transition_config):
-                self.restore_gpio(transition_gpio)
-                return
+                if not self.apply_arm_motion_profile(transition_config):
+                    self.restore_gpio(previous_gpio)
+                    message = "Failed to apply arm motion profile."
+                    self.get_logger().error(message)
+                via_ok = skip_transition_via or self.move_to_transition_via_target(target_state)
+                if not via_ok and (
+                    self.is_best_effort_reached(self.last_move_error)
+                    or self.is_stale_feedback_error(self.last_move_error)
+                ):
+                    self.get_logger().warn(
+                        f"Transition via for '{target_state}' treated as reached despite warning: "
+                        f"{self.last_move_error}"
+                    )
+                    via_ok = True
 
-            if not self.move_to_state_target(target_state, transition_config):
-                self.restore_gpio(transition_gpio)
-                return
+                if not via_ok:
+                    self.restore_gpio(previous_gpio)
+                    message = f"Failed to move through transition point for state '{target_state}'."
+                    self.get_logger().error(message)
+                elif not self.move_to_state_target(target_state, transition_config):
+                    if self.is_best_effort_reached(self.last_move_error):
+                        self.get_logger().warn(
+                            f"Treating state '{target_state}' as reached despite final feedback warning: "
+                            f"{self.last_move_error}"
+                        )
+                        success = True
+                    elif is_startup and self.is_stale_feedback_error(self.last_move_error):
+                        self.restore_gpio(previous_gpio)
+                        message = (
+                            f"Stale joint feedback during startup move to '{target_state}'; "
+                            f"will retry on next timer tick."
+                        )
+                        self.get_logger().warn(message)
+                    else:
+                        self.restore_gpio(previous_gpio)
+                        message = f"Failed to move to arm state '{target_state}'."
+                        if self.last_move_error:
+                            message += f" Reason: {self.last_move_error}"
+                        self.get_logger().error(message)
+                else:
+                    success = True
 
-            if action.after_move is not None:
-                self.apply_output(action.after_move)
+                if success:
+                    if action.after_move is not None:
+                        self.apply_output(action.after_move)
 
-            self.current_state = target_state
-            self.startup_sequence_done = True
-            self.publish_state_name()
-            self.get_logger().info(f"Arm state machine entered state '{target_state}'.")
+                    self.current_state = target_state
+                    self.startup_sequence_done = True
+                    self.publish_state_name()
+                    message = f"Arm state machine entered state '{target_state}'."
+                    self.get_logger().info(message)
 
-            if is_startup and previous_state == target_state:
-                self.get_logger().info("Arm state machine initialized to idle state.")
+                    if is_startup and target_state == "idle":
+                        self.get_logger().info("Arm state machine initialized to idle state.")
+
+                    # Auto-chain: after certain states, automatically transition to the next
+                    if (
+                        not is_startup
+                        and target_state in self.auto_chain_states
+                    ):
+                        next_auto = self.next_state_name(target_state)
+                        self.auto_chain_target = next_auto
+                        self.auto_chain_pending = True
+                        self.get_logger().info(
+                            f"Auto-chain scheduled: {target_state} -> {next_auto} "
+                            f"after {self.auto_chain_delay_sec:.1f}s"
+                        )
+                        self.auto_chain_timer = self.create_timer(
+                            self.auto_chain_delay_sec,
+                            self._on_auto_chain_tick,
+                        )
         finally:
             self.busy = False
 
-        if self.pending_advance_requested and self.startup_sequence_done:
+        if success:
             self.pending_advance_requested = False
-            queued_state = self.next_state_name(self.current_state)
-            self.get_logger().info(
-                f"Processing queued DPad-down press toward state '{queued_state}'."
-            )
-            self.start_transition(queued_state)
+        return success, message
+
+    def _on_auto_chain_tick(self) -> None:
+        if self.auto_chain_timer is not None:
+            self.auto_chain_timer.cancel()
+            self.auto_chain_timer = None
+        self.auto_chain_pending = False
+        target = self.auto_chain_target
+        self.auto_chain_target = ""
+        if target and target in self.state_sequence:
+            self.get_logger().info(f"Auto-chain executing: {self.current_state} -> {target}")
+            self.start_transition(target)
 
     def services_ready(self) -> bool:
         move_ready = self.move_client.wait_for_service(timeout_sec=0.1)
@@ -302,6 +470,22 @@ class ArmStateMachineNode(Node):
         if action.before_move is not None:
             return bool(action.before_move)
         return bool(previous_gpio)
+
+    @staticmethod
+    def is_best_effort_reached(message: str) -> bool:
+        lowered = message.lower()
+        return (
+            "trajectory stream completed" in lowered
+            or "reached the hold phase" in lowered
+        )
+
+    @staticmethod
+    def is_stale_feedback_error(message: str) -> bool:
+        lowered = message.lower()
+        return (
+            "measured joint feedback is stale" in lowered
+            or "joint feedback was stale" in lowered
+        )
 
     def apply_arm_motion_profile(self, config: ArmStateConfig) -> bool:
         request = SetParameters.Request()
@@ -337,33 +521,56 @@ class ArmStateMachineNode(Node):
 
         return True
 
-    def move_to_state_target(self, state_name: str, config: Optional[ArmStateConfig] = None) -> bool:
-        if config is None:
-            config = self.state_configs[state_name]
+    def move_to_transition_via_target(self, state_name: str) -> bool:
+        return self.move_to_cartesian_target(
+            f"{state_name}:transition_via",
+            self.transition_via_x,
+            self.transition_via_z,
+        )
+
+    def move_to_cartesian_target(self, label: str, x: float, z: float) -> bool:
+        self.last_move_error = ""
         request = MoveToXZ.Request()
-        request.x = config.x
-        request.z = config.z
+        request.x = x
+        request.z = z
 
         try:
             response = self.move_client.call(request)
         except Exception as exc:
-            self.get_logger().error(f"Move service call failed for state '{state_name}': {exc}")
+            self.last_move_error = str(exc)
+            self.get_logger().error(f"Move service call failed for '{label}': {exc}")
             return False
 
         if response is None:
-            self.get_logger().error(f"Move service returned no response for state '{state_name}'.")
+            self.last_move_error = "empty response"
+            self.get_logger().error(f"Move service returned no response for '{label}'.")
             return False
 
         if not response.accepted:
-            self.get_logger().error(
-                f"Move service rejected state '{state_name}': {response.message}"
-            )
+            self.last_move_error = response.message
+            if self.is_stale_feedback_error(response.message):
+                self.get_logger().warn(
+                    f"Move service rejected '{label}' (transient): {response.message}"
+                )
+            elif self.is_best_effort_reached(response.message):
+                self.get_logger().warn(
+                    f"Move service rejected '{label}' (best-effort): {response.message}"
+                )
+            else:
+                self.get_logger().error(
+                    f"Move service rejected '{label}': {response.message}"
+                )
             return False
 
         self.get_logger().info(
-            f"State '{state_name}' reached x={config.x:.3f}, z={config.z:.3f}. {response.message}"
+            f"Target '{label}' reached x={x:.3f}, z={z:.3f}. {response.message}"
         )
         return True
+
+    def move_to_state_target(self, state_name: str, config: Optional[ArmStateConfig] = None) -> bool:
+        if config is None:
+            config = self.state_configs[state_name]
+        return self.move_to_cartesian_target(state_name, config.x, config.z)
 
     def prepare_gpio(self) -> bool:
         if self.gpio_number < 0:
@@ -441,7 +648,7 @@ class ArmStateMachineNode(Node):
         self.state_name_pub.publish(String(data=self.current_state))
 
     def destroy_node(self) -> bool:
-        if self.set_low_on_shutdown and self.gpio_ready:
+        if self.set_low_on_shutdown and self.gpio_ready and rclpy.ok():
             self.apply_output(False)
         return super().destroy_node()
 

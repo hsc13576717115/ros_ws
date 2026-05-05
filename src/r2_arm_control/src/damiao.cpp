@@ -1,6 +1,7 @@
 #include "r2_arm_control/damiao.hpp"
 
 #include <cerrno>
+#include <fcntl.h>
 #include <iostream>
 #include <linux/can.h>
 #include <linux/can/raw.h>
@@ -193,6 +194,11 @@ Motor_Control::Motor_Control(
                 "Failed to bind CAN interface '" + socketcan_interface_name_ + "': " +
                 std::string(std::strerror(errno)));
       }
+
+      const int flags = ::fcntl(socket_fd_, F_GETFL, 0);
+      if (flags >= 0) {
+        ::fcntl(socket_fd_, F_SETFL, flags | O_NONBLOCK);
+      }
     } else {
       const LibSerial::BaudRate baud_rate_enum = intToBaudRate(baud_rate);
       std::cerr << "Configuring serial port " << serial_port_
@@ -224,7 +230,12 @@ Motor_Control::~Motor_Control()
   for (const auto & m : *data_ptr_) {
     const int motor_id = m.first;
     if (motors_.find(motor_id) != motors_.end()) {
-      control_mit(*motors_[motor_id], 0.0f, 0.3f, 0.0f, 0.0f, 0.0f);
+      try {
+        control_mit(*motors_[motor_id], 0.0f, 0.3f, 0.0f, 0.0f, 0.0f);
+      } catch (const std::exception & e) {
+        std::cerr << "Failed to send shutdown hold command for motor " << motor_id
+                  << ": " << e.what() << std::endl;
+      }
     }
   }
 
@@ -730,7 +741,7 @@ void Motor_Control::get_motor_data_thread()
   while (!stop_thread_) {
     try {
       const auto now_time = std::chrono::steady_clock::now();
-      if (
+      if (false &&
         last_receive_diag_log_time_.time_since_epoch().count() != 0 &&
         (now_time - last_receive_diag_log_time_) >= read_error_log_interval_)
       {
@@ -822,9 +833,17 @@ void Motor_Control::WriteData(const can_send_frame & frame)
     std::lock_guard<std::mutex> lock(serial_mutex_);
     const auto written = ::write(socket_fd_, &raw_frame, sizeof(raw_frame));
     if (written != static_cast<ssize_t>(sizeof(raw_frame))) {
-      throw std::runtime_error(
-              "SocketCAN write failed on '" + socketcan_interface_name_ + "': " +
-              std::string(std::strerror(errno)));
+      if (written < 0 && (errno == EAGAIN || errno == ENOBUFS)) {
+        log_write_error(
+          "SocketCAN write would block on '" + socketcan_interface_name_ +
+          "'; dropping frame for id=0x" + std::to_string(frame.canId));
+      } else {
+        const std::string error_message = written < 0
+          ? std::strerror(errno)
+          : "short write";
+        log_write_error(
+          "SocketCAN write failed on '" + socketcan_interface_name_ + "': " + error_message);
+      }
     }
     return;
   }
@@ -832,8 +851,24 @@ void Motor_Control::WriteData(const can_send_frame & frame)
   const auto * frame_ptr = reinterpret_cast<const uint8_t *>(&frame);
   const size_t data_size = sizeof(can_send_frame);
   LibSerial::DataBuffer tx_buffer(frame_ptr, frame_ptr + data_size);
-  std::lock_guard<std::mutex> lock(serial_mutex_);
-  serial_.Write(tx_buffer);
+  try {
+    std::lock_guard<std::mutex> lock(serial_mutex_);
+    serial_.Write(tx_buffer);
+  } catch (const std::exception & e) {
+    log_write_error("Serial write failed on '" + serial_port_ + "': " + e.what());
+  }
+}
+
+void Motor_Control::log_write_error(const std::string & message)
+{
+  const auto now_time = std::chrono::steady_clock::now();
+  if (
+    last_write_error_log_time_.time_since_epoch().count() == 0 ||
+    (now_time - last_write_error_log_time_) >= read_error_log_interval_)
+  {
+    std::cerr << message << std::endl;
+    last_write_error_log_time_ = now_time;
+  }
 }
 
 bool Motor_Control::ReadData(CAN_Receive_Frame & frame, size_t timeout_ms)

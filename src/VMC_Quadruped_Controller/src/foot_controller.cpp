@@ -48,6 +48,7 @@ class Foot_Controller : public rclcpp::Node{
         std::chrono::steady_clock::time_point last_auto_cmd_time;
         std::chrono::steady_clock::time_point last_arm_control_time;
         bool use_imu_pitch = false;
+        double imu_pitch_sign = 1.0;
         double arm_stick_x = 0.0;
         double arm_stick_z = 0.0;
         double arm_target_x = 0.30;
@@ -75,6 +76,8 @@ class Foot_Controller : public rclcpp::Node{
         Cycloid cycloid;
         VMC_Param params[4];
     public: Foot_Controller(): Node("foot_controller"){
+        this->declare_parameter<double>("imu_pitch_sign", 1.0);
+        this->get_parameter("imu_pitch_sign", imu_pitch_sign);
         joy_subscription = this->create_subscription<sensor_msgs::msg::Joy>("joy",10,std::bind(&Foot_Controller::joy_callback,this,std::placeholders::_1));
         move_cmd_subscription = this->create_subscription<vmc_quadruped_controller::msg::MoveCmd>("move_cmd",10,std::bind(&Foot_Controller::move_cmd_callback,this,std::placeholders::_1));
         euler_subscription = this->create_subscription<yesense_interface::msg::EulerOnly>("euler_only",10,std::bind(&Foot_Controller::euler_callback,this,std::placeholders::_1));
@@ -258,7 +261,7 @@ class Foot_Controller : public rclcpp::Node{
     }
     private: void euler_callback(const yesense_interface::msg::EulerOnly::SharedPtr msg){
         // RCLCPP_INFO(this->get_logger(),"euler:%.3f %.3f %.3f",msg->euler.pitch,msg->euler.roll,msg->euler.yaw);
-        float recvd_pitch = msg->euler.pitch/180.0*M_PI;
+        float recvd_pitch = static_cast<float>(imu_pitch_sign * msg->euler.pitch / 180.0 * M_PI);
         imu_pitch = imu_pitch + (recvd_pitch - imu_pitch) * IMU_PITCH_KD;
         imu_yaw = msg->euler.yaw;
         // RCLCPP_INFO(this->get_logger(),"imu_pitch:%.3f",imu_pitch);

@@ -4,7 +4,7 @@ import json
 import math
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 import rclpy
 import yaml
@@ -16,6 +16,7 @@ from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.time import Time
+from r2_arm_control.srv import SetArmState
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 from vision_msgs.msg import Detection2DArray
@@ -31,12 +32,40 @@ class YoloTask:
 
 
 @dataclass
+class ArmTask:
+    enabled: bool = False
+    state: str = ''
+    timeout_sec: float = 20.0
+    continue_on_failure: bool = False
+
+
+@dataclass
+class PlaceTask:
+    enabled: bool = False
+    target: str = 'auto'
+    transfer_x: float = 3.85
+    side_aisle_y: float = 1.55
+    return_to_next_pick: bool = True
+
+
+@dataclass
+class PlaceTarget:
+    name: str
+    x: float
+    y: float
+    yaw: float
+    aliases: List[str] = field(default_factory=list)
+
+
+@dataclass
 class Waypoint:
     name: str
     x: float
     y: float
     yaw: float
     yolo: YoloTask = field(default_factory=YoloTask)
+    arm: ArmTask = field(default_factory=ArmTask)
+    place: PlaceTask = field(default_factory=PlaceTask)
 
 
 @dataclass
@@ -75,6 +104,9 @@ class PresetWaypointMission(Node):
         self.declare_parameter('pause_after_reach_sec', 0.2)
         self.declare_parameter('same_position_tolerance', 0.05)
         self.declare_parameter('same_yaw_tolerance_deg', 5.0)
+        self.declare_parameter('skip_already_reached_nav_goals', True)
+        self.declare_parameter('already_reached_xy_tolerance', 0.18)
+        self.declare_parameter('already_reached_yaw_tolerance_deg', 12.0)
         self.declare_parameter('spin_time_allowance_sec', 20.0)
         self.declare_parameter('spin_lookup_timeout_sec', 0.10)
         self.declare_parameter('markers_topic', '/preset_waypoints')
@@ -82,10 +114,15 @@ class PresetWaypointMission(Node):
         self.declare_parameter('current_goal_topic', '/preset_current_goal')
         self.declare_parameter('marker_point_scale', 0.22)
         self.declare_parameter('marker_text_scale', 0.18)
+        self.declare_parameter('publish_field_layout', True)
+        self.declare_parameter('publish_task_item_zones', True)
         self.declare_parameter('yolo_enable_topic', '/yolo/enable')
         self.declare_parameter('yolo_detection_topic', '/yolo/detections')
         self.declare_parameter('yolo_result_topic', '/preset_yolo_result')
         self.declare_parameter('yolo_result_text_scale', 0.14)
+        self.declare_parameter('arm_state_service_name', '/r2/arm/set_state')
+        self.declare_parameter('arm_state_topic', '/r2/arm/state_machine_state')
+        self.declare_parameter('arm_default_timeout_sec', 20.0)
 
         self._waypoint_file = str(self.get_parameter('waypoint_file').value)
         self._frame_id = str(self.get_parameter('frame_id').value)
@@ -107,6 +144,15 @@ class PresetWaypointMission(Node):
         self._same_yaw_tolerance = math.radians(
             float(self.get_parameter('same_yaw_tolerance_deg').value)
         )
+        self._skip_already_reached_nav_goals = self._to_bool(
+            self.get_parameter('skip_already_reached_nav_goals').value
+        )
+        self._already_reached_xy_tolerance = max(
+            0.0, float(self.get_parameter('already_reached_xy_tolerance').value)
+        )
+        self._already_reached_yaw_tolerance = math.radians(
+            float(self.get_parameter('already_reached_yaw_tolerance_deg').value)
+        )
         self._spin_time_allowance_sec = max(
             0.0, float(self.get_parameter('spin_time_allowance_sec').value)
         )
@@ -117,6 +163,12 @@ class PresetWaypointMission(Node):
             self.get_parameter('marker_point_scale').value
         )
         self._marker_text_scale = float(self.get_parameter('marker_text_scale').value)
+        self._publish_field_layout = self._to_bool(
+            self.get_parameter('publish_field_layout').value
+        )
+        self._publish_task_item_zones = self._to_bool(
+            self.get_parameter('publish_task_item_zones').value
+        )
         self._yolo_result_text_scale = float(
             self.get_parameter('yolo_result_text_scale').value
         )
@@ -127,6 +179,13 @@ class PresetWaypointMission(Node):
         yolo_enable_topic = str(self.get_parameter('yolo_enable_topic').value)
         yolo_detection_topic = str(self.get_parameter('yolo_detection_topic').value)
         yolo_result_topic = str(self.get_parameter('yolo_result_topic').value)
+        arm_state_service_name = str(
+            self.get_parameter('arm_state_service_name').value
+        )
+        self._arm_state_topic = str(self.get_parameter('arm_state_topic').value)
+        self._arm_default_timeout_sec = max(
+            1.0, float(self.get_parameter('arm_default_timeout_sec').value)
+        )
 
         self._marker_pub = self.create_publisher(MarkerArray, markers_topic, 10)
         self._route_pub = self.create_publisher(Path, route_topic, 10)
@@ -139,11 +198,21 @@ class PresetWaypointMission(Node):
             self._yolo_detection_callback,
             20,
         )
+        self._arm_state_sub = self.create_subscription(
+            String,
+            self._arm_state_topic,
+            self._arm_state_callback,
+            10,
+        )
+        self._arm_client = self.create_client(SetArmState, arm_state_service_name)
         self._action_client = ActionClient(self, NavigateToPose, self._action_name)
         self._spin_action_client = ActionClient(self, Spin, self._spin_action_name)
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=True)
 
+        self._place_targets: Dict[str, PlaceTarget] = {}
+        self._class_alias_to_place_target: Dict[str, str] = {}
+        self._dynamic_place_inserted_for: Set[str] = set()
         self._waypoints: List[Waypoint] = self._load_waypoints(self._waypoint_file)
         self._index = 0
         self._retry_count = 0
@@ -161,7 +230,17 @@ class PresetWaypointMission(Node):
         self._yolo_observations: Dict[str, YoloObservation] = {}
         self._yolo_result_by_waypoint: Dict[str, str] = {}
         self._yolo_has_detection_by_waypoint: Dict[str, bool] = {}
+        self._yolo_best_class_by_waypoint: Dict[str, str] = {}
         self._yolo_default_task = YoloTask()
+        self._arm_task_active = False
+        self._arm_task_index: Optional[int] = None
+        self._arm_request_sent = False
+        self._arm_request_sent_sec = 0.0
+        self._arm_deadline_sec = 0.0
+        self._arm_future = None
+        self._arm_current_state = ''
+        self._arm_state_update_sec = 0.0
+        self._last_wait_arm_service_log_sec = 0.0
 
         self._set_yolo_enabled(False, force=True)
 
@@ -229,6 +308,117 @@ class PresetWaypointMission(Node):
             min_score=min_score,
         )
 
+    def _parse_arm_task(self, item: dict) -> ArmTask:
+        raw_cfg = item.get('arm', item.get('arm_state', False))
+        enabled = False
+        state = ''
+        timeout_sec = self._arm_default_timeout_sec
+        continue_on_failure = False
+
+        if isinstance(raw_cfg, dict):
+            state = str(raw_cfg.get('state', '')).strip().lower()
+            enabled = self._to_bool(raw_cfg.get('enabled', bool(state)))
+            timeout_sec = max(
+                1.0, float(raw_cfg.get('timeout_sec', timeout_sec))
+            )
+            continue_on_failure = self._to_bool(
+                raw_cfg.get('continue_on_failure', False)
+            )
+        elif isinstance(raw_cfg, str):
+            state = raw_cfg.strip().lower()
+            enabled = state not in ('', 'none', 'false', 'off', 'skip', 'null')
+        else:
+            enabled = self._to_bool(raw_cfg)
+            state = str(item.get('arm_state', '')).strip().lower()
+
+        if enabled and not state:
+            state = 'idle'
+
+        return ArmTask(
+            enabled=enabled,
+            state=state,
+            timeout_sec=timeout_sec,
+            continue_on_failure=continue_on_failure,
+        )
+
+    def _parse_place_task(self, item: dict) -> PlaceTask:
+        raw_cfg = item.get('place', item.get('place_after_pick', False))
+        enabled = False
+        target = 'auto'
+        transfer_x = 3.85
+        side_aisle_y = 1.55
+        return_to_next_pick = True
+
+        if isinstance(raw_cfg, dict):
+            enabled = self._to_bool(raw_cfg.get('enabled', False))
+            target = str(raw_cfg.get('target', target)).strip()
+            transfer_x = float(raw_cfg.get('transfer_x', transfer_x))
+            side_aisle_y = float(raw_cfg.get('side_aisle_y', side_aisle_y))
+            return_to_next_pick = self._to_bool(
+                raw_cfg.get('return_to_next_pick', return_to_next_pick)
+            )
+        elif isinstance(raw_cfg, str):
+            target = raw_cfg.strip()
+            enabled = target.lower() not in ('', 'none', 'false', 'off', 'skip', 'null')
+        else:
+            enabled = self._to_bool(raw_cfg)
+
+        if enabled and not target:
+            target = 'auto'
+
+        return PlaceTask(
+            enabled=enabled,
+            target=target,
+            transfer_x=transfer_x,
+            side_aisle_y=side_aisle_y,
+            return_to_next_pick=return_to_next_pick,
+        )
+
+    @staticmethod
+    def _normalize_class_key(value: str) -> str:
+        return str(value).strip().lower().replace(' ', '').replace('_', '').replace('-', '')
+
+    def _is_arm_task_complete(self, requested_state: str) -> bool:
+        if self._arm_current_state == requested_state:
+            return True
+        # Support auto-chain: pick -> store, place -> idle
+        if requested_state == 'pick' and self._arm_current_state == 'store':
+            return True
+        if requested_state == 'place' and self._arm_current_state == 'idle':
+            return True
+        return False
+
+    def _parse_place_targets(self, data) -> None:
+        self._place_targets.clear()
+        self._class_alias_to_place_target.clear()
+
+        if not isinstance(data, dict):
+            return
+
+        for name, raw_target in data.items():
+            if not isinstance(raw_target, dict):
+                continue
+            try:
+                x = float(raw_target.get('x', 0.0))
+                y = float(raw_target.get('y', 0.0))
+                if 'yaw' in raw_target:
+                    yaw = float(raw_target['yaw'])
+                else:
+                    yaw = math.radians(float(raw_target.get('yaw_deg', 0.0)))
+            except Exception:
+                self.get_logger().warn(f'Skip invalid place target: {name}')
+                continue
+
+            aliases = raw_target.get('aliases', [])
+            if isinstance(aliases, str):
+                aliases = [aliases]
+            aliases = [str(alias) for alias in aliases if str(alias).strip()]
+
+            target = PlaceTarget(str(name), x, y, yaw, aliases)
+            self._place_targets[target.name] = target
+            for alias in [target.name] + aliases:
+                self._class_alias_to_place_target[self._normalize_class_key(alias)] = target.name
+
     def _load_waypoints(self, file_path: str) -> List[Waypoint]:
         if not file_path:
             self.get_logger().error('Parameter waypoint_file is empty.')
@@ -246,6 +436,9 @@ class PresetWaypointMission(Node):
 
         self._yolo_default_task = self._parse_yolo_defaults(
             data.get('yolo', {}) if isinstance(data, dict) else {}
+        )
+        self._parse_place_targets(
+            data.get('place_targets', {}) if isinstance(data, dict) else {}
         )
 
         raw_items = data.get('waypoints', data if isinstance(data, list) else [])
@@ -277,6 +470,8 @@ class PresetWaypointMission(Node):
                     y=y,
                     yaw=yaw,
                     yolo=self._parse_yolo_task(item),
+                    arm=self._parse_arm_task(item),
+                    place=self._parse_place_task(item),
                 )
             )
 
@@ -299,6 +494,163 @@ class PresetWaypointMission(Node):
             return None
         return self._waypoints[self._index - 1]
 
+    @staticmethod
+    def _heading_from_delta(dx: float, dy: float, fallback: float = 0.0) -> float:
+        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+            return fallback
+        return math.atan2(dy, dx)
+
+    def _resolve_place_target(self, wp: Waypoint) -> Optional[PlaceTarget]:
+        target_key = wp.place.target.strip()
+        if target_key and target_key.lower() not in ('auto', 'detected'):
+            target = self._place_targets.get(target_key)
+            if target is not None:
+                return target
+            mapped_name = self._class_alias_to_place_target.get(
+                self._normalize_class_key(target_key)
+            )
+            if mapped_name:
+                return self._place_targets.get(mapped_name)
+            self.get_logger().warn(
+                f'Place target "{target_key}" from waypoint {wp.name} is not configured.'
+            )
+
+        detected_class = self._yolo_best_class_by_waypoint.get(wp.name, '')
+        mapped_name = self._class_alias_to_place_target.get(
+            self._normalize_class_key(detected_class)
+        )
+        if mapped_name:
+            return self._place_targets.get(mapped_name)
+
+        fallback = self._place_targets.get('UNKNOWN_PLACE')
+        if fallback is not None:
+            self.get_logger().warn(
+                f'No place target mapping for detection "{detected_class}" at {wp.name}; '
+                f'using UNKNOWN_PLACE.'
+            )
+            return fallback
+
+        self.get_logger().error(
+            f'No place target mapping for detection "{detected_class}" at {wp.name}.'
+        )
+        return None
+
+    def _make_waypoint(
+        self,
+        name: str,
+        x: float,
+        y: float,
+        yaw: float,
+        arm_state: str = '',
+    ) -> Waypoint:
+        return Waypoint(
+            name=name,
+            x=x,
+            y=y,
+            yaw=yaw,
+            yolo=YoloTask(enabled=False),
+            arm=ArmTask(enabled=bool(arm_state), state=arm_state),
+            place=PlaceTask(enabled=False),
+        )
+
+    def _insert_dynamic_place_route(self, wp: Waypoint) -> bool:
+        if not wp.place.enabled or wp.name in self._dynamic_place_inserted_for:
+            return False
+        if self._index >= len(self._waypoints):
+            return False
+
+        target = self._resolve_place_target(wp)
+        if target is None:
+            return False
+
+        next_wp = (
+            self._waypoints[self._index + 1]
+            if (self._index + 1) < len(self._waypoints)
+            else None
+        )
+
+        transfer_x = wp.place.transfer_x
+        side_aisle_y = wp.place.side_aisle_y
+        route: List[Waypoint] = []
+
+        route.append(
+            self._make_waypoint(
+                f'{wp.name}_STORE',
+                wp.x,
+                wp.y,
+                wp.yaw,
+                'store',
+            )
+        )
+        route.append(
+            self._make_waypoint(
+                f'{wp.name}_TO_TRANSFER',
+                transfer_x,
+                wp.y,
+                self._heading_from_delta(transfer_x - wp.x, 0.0, wp.yaw),
+            )
+        )
+        route.append(
+            self._make_waypoint(
+                f'{wp.name}_ALIGN_{target.name}',
+                transfer_x,
+                target.y,
+                self._heading_from_delta(0.0, target.y - wp.y, 0.0),
+            )
+        )
+        route.append(
+            self._make_waypoint(
+                f'{wp.name}_PLACE_{target.name}',
+                target.x,
+                target.y,
+                target.yaw,
+                'place',
+            )
+        )
+
+        if wp.place.return_to_next_pick and next_wp is not None:
+            route.append(
+                self._make_waypoint(
+                    f'{wp.name}_EXIT_PLACE',
+                    transfer_x,
+                    target.y,
+                    self._heading_from_delta(transfer_x - target.x, 0.0, target.yaw),
+                )
+            )
+            route.append(
+                self._make_waypoint(
+                    f'{wp.name}_SIDE_AISLE',
+                    transfer_x,
+                    side_aisle_y,
+                    self._heading_from_delta(0.0, side_aisle_y - target.y, 0.0),
+                )
+            )
+            route.append(
+                self._make_waypoint(
+                    f'{wp.name}_NEXT_ROW',
+                    next_wp.x,
+                    side_aisle_y,
+                    self._heading_from_delta(next_wp.x - transfer_x, 0.0, math.pi),
+                )
+            )
+            route.append(
+                self._make_waypoint(
+                    f'{wp.name}_ALIGN_NEXT',
+                    next_wp.x,
+                    next_wp.y,
+                    self._heading_from_delta(0.0, next_wp.y - side_aisle_y, 0.0),
+                )
+            )
+
+        insert_at = self._index + 1
+        self._waypoints[insert_at:insert_at] = route
+        self._dynamic_place_inserted_for.add(wp.name)
+        self.get_logger().info(
+            f'Inserted dynamic place route after {wp.name}: target={target.name}, '
+            f'inserted_waypoints={len(route)}'
+        )
+        return True
+
     def _should_spin_to_current_waypoint(self) -> bool:
         previous = self._get_previous_waypoint()
         if previous is None or self._index >= len(self._waypoints):
@@ -313,6 +665,15 @@ class PresetWaypointMission(Node):
         )
 
     def _get_robot_yaw(self) -> Optional[float]:
+        pose = self._get_robot_pose_for_skip(log_on_failure=True)
+        if pose is None:
+            return None
+        return pose[2]
+
+    def _get_robot_pose_for_skip(
+        self,
+        log_on_failure: bool = False,
+    ) -> Optional[tuple[float, float, float]]:
         try:
             transform = self._tf_buffer.lookup_transform(
                 self._frame_id,
@@ -321,13 +682,46 @@ class PresetWaypointMission(Node):
                 timeout=Duration(seconds=self._spin_lookup_timeout_sec),
             )
         except TransformException as exc:
-            self.get_logger().warn(
-                f'Failed to lookup {self._frame_id} -> {self._base_frame} for spin goal: {exc}'
-            )
+            if log_on_failure:
+                self.get_logger().warn(
+                    f'Failed to lookup {self._frame_id} -> {self._base_frame}: {exc}'
+                )
             return None
 
+        translation = transform.transform.translation
         q = transform.transform.rotation
-        return quaternion_to_yaw(q.x, q.y, q.z, q.w)
+        yaw = quaternion_to_yaw(q.x, q.y, q.z, q.w)
+        return translation.x, translation.y, yaw
+
+    def _maybe_skip_already_reached_waypoint(self) -> bool:
+        if not self._skip_already_reached_nav_goals:
+            return False
+        if self._index >= len(self._waypoints):
+            return False
+
+        wp = self._waypoints[self._index]
+        if wp.yolo.enabled or wp.arm.enabled:
+            return False
+
+        pose = self._get_robot_pose_for_skip()
+        if pose is None:
+            return False
+
+        robot_x, robot_y, robot_yaw = pose
+        xy_delta = math.hypot(wp.x - robot_x, wp.y - robot_y)
+        yaw_delta = abs(normalize_angle(wp.yaw - robot_yaw))
+        if (
+            xy_delta <= self._already_reached_xy_tolerance
+            and yaw_delta <= self._already_reached_yaw_tolerance
+        ):
+            self.get_logger().info(
+                f'Skipping already reached waypoint [{self._index + 1}/{len(self._waypoints)}] '
+                f'{wp.name}: distance={xy_delta:.3f}m, yaw_delta={yaw_delta:.3f}rad'
+            )
+            self._complete_waypoint()
+            return True
+
+        return False
 
     def _wait_for_current_action_server(self, now_sec: float) -> bool:
         action_client = (
@@ -374,6 +768,9 @@ class PresetWaypointMission(Node):
         if self._yolo_task_active:
             self._tick_yolo_task()
             return
+        if self._arm_task_active:
+            self._tick_arm_task()
+            return
 
         now_sec = self._now_sec()
         if now_sec < self._next_send_time_sec:
@@ -390,6 +787,9 @@ class PresetWaypointMission(Node):
                 self.get_logger().info('Preset waypoint mission completed.')
                 return
 
+        if self._maybe_skip_already_reached_waypoint():
+            return
+
         if not self._wait_for_current_action_server(now_sec):
             return
 
@@ -400,6 +800,72 @@ class PresetWaypointMission(Node):
         if now_sec < self._yolo_collect_deadline_sec:
             return
         self._finish_yolo_task()
+
+    def _tick_arm_task(self) -> None:
+        if self._arm_task_index is None or self._arm_task_index >= len(self._waypoints):
+            self._arm_task_active = False
+            return
+
+        now_sec = self._now_sec()
+        wp = self._waypoints[self._arm_task_index]
+        if now_sec > self._arm_deadline_sec:
+            self._handle_arm_failure(wp, 'timeout')
+            return
+
+        if not self._arm_request_sent:
+            if not self._arm_client.wait_for_service(timeout_sec=0.0):
+                if (now_sec - self._last_wait_arm_service_log_sec) > 2.0:
+                    self._last_wait_arm_service_log_sec = now_sec
+                    self.get_logger().info(
+                        'Waiting for arm state service: /r2/arm/set_state'
+                    )
+                return
+
+            request = SetArmState.Request()
+            request.state = wp.arm.state
+            self._arm_future = self._arm_client.call_async(request)
+            self._arm_request_sent = True
+            self._arm_request_sent_sec = now_sec
+            self.get_logger().info(
+                f'Sending arm task at waypoint {wp.name}: state={wp.arm.state}'
+            )
+            return
+
+        if self._arm_future is not None and not self._arm_future.done():
+            return
+
+        if self._arm_future is not None:
+            try:
+                response = self._arm_future.result()
+            except Exception as exc:
+                self._handle_arm_failure(wp, f'service exception: {exc}')
+                return
+
+            if response is None:
+                self._handle_arm_failure(wp, 'empty response')
+                return
+
+            if not response.accepted:
+                self._handle_arm_failure(wp, response.message)
+                return
+
+            self._arm_future = None
+            self.get_logger().info(
+                f'Arm task accepted at {wp.name}: requested={wp.arm.state}, '
+                f'current={response.state}, {response.message}'
+            )
+            return
+
+        if (
+            self._is_arm_task_complete(wp.arm.state)
+            and self._arm_state_update_sec >= self._arm_request_sent_sec
+        ):
+            self.get_logger().info(
+                f'Arm task finished at {wp.name}: state={self._arm_current_state}'
+            )
+            if wp.arm.state == 'pick':
+                self._insert_dynamic_place_route(wp)
+            self._finish_arm_task()
 
     def _send_current_goal(self) -> None:
         wp = self._waypoints[self._index]
@@ -506,6 +972,7 @@ class PresetWaypointMission(Node):
             )
         ]
         has_detection = bool(detections)
+        best_class = detections[0]['class_id'] if detections else ''
         summary = (
             ', '.join(
                 f'{item["class_id"]}@{item["best_score"]:.2f} x{item["count"]}'
@@ -522,6 +989,7 @@ class PresetWaypointMission(Node):
             'yaw': round(wp.yaw, 3),
             'success': True,
             'has_detection': has_detection,
+            'best_class': best_class,
             'min_score': round(wp.yolo.min_score, 3),
             'detections': detections,
             'summary': summary,
@@ -543,6 +1011,7 @@ class PresetWaypointMission(Node):
 
         self._yolo_result_by_waypoint[wp.name] = payload['summary']
         self._yolo_has_detection_by_waypoint[wp.name] = bool(payload['has_detection'])
+        self._yolo_best_class_by_waypoint[wp.name] = str(payload.get('best_class', ''))
 
         if payload['has_detection']:
             self.get_logger().info(
@@ -557,6 +1026,35 @@ class PresetWaypointMission(Node):
         self._yolo_task_index = None
         self._yolo_observations.clear()
         self._set_yolo_enabled(False)
+        if wp.arm.enabled:
+            self._start_arm_task(wp)
+            return
+
+        self._complete_waypoint()
+
+    def _start_arm_task(self, wp: Waypoint) -> None:
+        now_sec = self._now_sec()
+        self._arm_task_active = True
+        self._arm_task_index = self._index
+        self._arm_request_sent = False
+        self._arm_request_sent_sec = 0.0
+        self._arm_future = None
+        self._arm_deadline_sec = now_sec + wp.arm.timeout_sec
+        self._active_goal_kind = 'arm'
+        self.get_logger().info(
+            f'Starting arm task at waypoint {wp.name}: '
+            f'state={wp.arm.state}, timeout={wp.arm.timeout_sec:.1f}s'
+        )
+
+    def _finish_arm_task(self) -> None:
+        self._arm_task_active = False
+        self._arm_task_index = None
+        self._arm_request_sent = False
+        self._arm_request_sent_sec = 0.0
+        self._arm_future = None
+        self._complete_waypoint()
+
+    def _complete_waypoint(self) -> None:
         self._index += 1
         self._retry_count = 0
         self._active_goal_kind = 'navigate'
@@ -588,6 +1086,10 @@ class PresetWaypointMission(Node):
             observation.count += 1
             observation.best_score = max(observation.best_score, score)
 
+    def _arm_state_callback(self, msg: String) -> None:
+        self._arm_current_state = msg.data.strip().lower()
+        self._arm_state_update_sec = self._now_sec()
+
     def _on_goal_result(self, future) -> None:
         try:
             wrapped = future.result()
@@ -609,13 +1111,35 @@ class PresetWaypointMission(Node):
                 self._start_yolo_task(wp)
                 return
 
-            self._index += 1
-            self._retry_count = 0
-            self._active_goal_kind = 'navigate'
-            self._next_send_time_sec = self._now_sec() + self._pause_after_reach_sec
+            if wp.arm.enabled:
+                self._start_arm_task(wp)
+                return
+
+            self._complete_waypoint()
             return
 
         self._handle_goal_failure(f'status={status}')
+
+    def _handle_arm_failure(self, wp: Waypoint, reason: str) -> None:
+        self.get_logger().error(
+            f'Arm task failed at waypoint {wp.name}: state={wp.arm.state}, reason={reason}'
+        )
+        self._arm_task_active = False
+        self._arm_task_index = None
+        self._arm_request_sent = False
+        self._arm_request_sent_sec = 0.0
+        self._arm_future = None
+
+        if wp.arm.continue_on_failure:
+            self.get_logger().warn(
+                f'Continuing mission after arm failure at waypoint {wp.name}.'
+            )
+            self._complete_waypoint()
+            return
+
+        self._mission_done = True
+        self._set_yolo_enabled(False)
+        self.get_logger().error('Mission stopped due to arm task failure.')
 
     def _handle_goal_failure(self, reason: str) -> None:
         wp = self._waypoints[self._index]
@@ -636,6 +1160,11 @@ class PresetWaypointMission(Node):
         self._yolo_task_active = False
         self._yolo_task_index = None
         self._yolo_observations.clear()
+        self._arm_task_active = False
+        self._arm_task_index = None
+        self._arm_request_sent = False
+        self._arm_request_sent_sec = 0.0
+        self._arm_future = None
 
         if self._stop_on_failure:
             self._mission_done = True
@@ -645,8 +1174,426 @@ class PresetWaypointMission(Node):
         self._index += 1
         self._next_send_time_sec = self._now_sec() + 0.2
 
+    def _append_cube_marker(
+        self,
+        markers: MarkerArray,
+        stamp,
+        ns: str,
+        marker_id: int,
+        x: float,
+        y: float,
+        z: float,
+        scale_x: float,
+        scale_y: float,
+        scale_z: float,
+        color: tuple[float, float, float, float],
+    ) -> None:
+        marker = Marker()
+        marker.header.stamp = stamp
+        marker.header.frame_id = self._frame_id
+        marker.ns = ns
+        marker.id = marker_id
+        marker.type = Marker.CUBE
+        marker.action = Marker.ADD
+        marker.pose.position.x = x
+        marker.pose.position.y = y
+        marker.pose.position.z = z
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = scale_x
+        marker.scale.y = scale_y
+        marker.scale.z = scale_z
+        marker.color.r = color[0]
+        marker.color.g = color[1]
+        marker.color.b = color[2]
+        marker.color.a = color[3]
+        markers.markers.append(marker)
+
+    def _append_text_marker(
+        self,
+        markers: MarkerArray,
+        stamp,
+        ns: str,
+        marker_id: int,
+        x: float,
+        y: float,
+        z: float,
+        text: str,
+        scale: float = 0.16,
+        color: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0),
+    ) -> None:
+        marker = Marker()
+        marker.header.stamp = stamp
+        marker.header.frame_id = self._frame_id
+        marker.ns = ns
+        marker.id = marker_id
+        marker.type = Marker.TEXT_VIEW_FACING
+        marker.action = Marker.ADD
+        marker.pose.position.x = x
+        marker.pose.position.y = y
+        marker.pose.position.z = z
+        marker.pose.orientation.w = 1.0
+        marker.scale.z = scale
+        marker.color.r = color[0]
+        marker.color.g = color[1]
+        marker.color.b = color[2]
+        marker.color.a = color[3]
+        marker.text = text
+        markers.markers.append(marker)
+
+    def _append_line_strip_marker(
+        self,
+        markers: MarkerArray,
+        stamp,
+        ns: str,
+        marker_id: int,
+        points: List[tuple[float, float, float]],
+        scale: float,
+        color: tuple[float, float, float, float],
+    ) -> None:
+        marker = Marker()
+        marker.header.stamp = stamp
+        marker.header.frame_id = self._frame_id
+        marker.ns = ns
+        marker.id = marker_id
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = scale
+        marker.color.r = color[0]
+        marker.color.g = color[1]
+        marker.color.b = color[2]
+        marker.color.a = color[3]
+        for x, y, z in points:
+            pt = Point()
+            pt.x = x
+            pt.y = y
+            pt.z = z
+            marker.points.append(pt)
+        markers.markers.append(marker)
+
+    def _append_field_layout_markers(self, markers: MarkerArray, stamp) -> None:
+        # Task-field dimensions from 2026 V2.0 figure 3/4, in meters.
+        # The start-zone center is map (0, 0); the 6m x 4m task field starts at x=0.5.
+        start_size = 1.0
+        field_length = 6.0
+        field_width = 4.0
+        field_min_x = start_size * 0.5
+        field_max_x = field_min_x + field_length
+        field_min_y = -field_width * 0.5
+        field_max_y = field_width * 0.5
+        field_center_x = (field_min_x + field_max_x) * 0.5
+        field_center_y = (field_min_y + field_max_y) * 0.5
+        speed_bump_x = field_max_x - 2.50
+        speed_bump_width = 0.35
+
+        self._append_cube_marker(
+            markers,
+            stamp,
+            'task_field_floor',
+            1,
+            field_center_x,
+            field_center_y,
+            -0.015,
+            field_max_x - field_min_x,
+            field_max_y - field_min_y,
+            0.02,
+            (1.0, 0.92, 0.12, 0.18),
+        )
+
+        self._append_line_strip_marker(
+            markers,
+            stamp,
+            'task_field_boundary',
+            2,
+            [
+                (field_min_x, field_min_y, 0.04),
+                (field_max_x, field_min_y, 0.04),
+                (field_max_x, field_max_y, 0.04),
+                (field_min_x, field_max_y, 0.04),
+                (field_min_x, field_min_y, 0.04),
+            ],
+            0.04,
+            (1.0, 0.55, 0.0, 1.0),
+        )
+
+        wall_color = (1.0, 0.55, 0.0, 0.45)
+        wall_thickness = 0.05
+        self._append_cube_marker(
+            markers,
+            stamp,
+            'task_field_wall',
+            1,
+            field_center_x,
+            field_max_y + wall_thickness * 0.5,
+            0.04,
+            field_length,
+            wall_thickness,
+            0.08,
+            wall_color,
+        )
+        self._append_cube_marker(
+            markers,
+            stamp,
+            'task_field_wall',
+            2,
+            field_center_x,
+            field_min_y - wall_thickness * 0.5,
+            0.04,
+            field_length,
+            wall_thickness,
+            0.08,
+            wall_color,
+        )
+        self._append_cube_marker(
+            markers,
+            stamp,
+            'task_field_wall',
+            3,
+            field_max_x + wall_thickness * 0.5,
+            field_center_y,
+            0.04,
+            wall_thickness,
+            field_width,
+            0.08,
+            wall_color,
+        )
+        entrance_segment = (field_width - start_size) * 0.5
+        self._append_cube_marker(
+            markers,
+            stamp,
+            'task_field_wall',
+            4,
+            field_min_x - wall_thickness * 0.5,
+            field_min_y + entrance_segment * 0.5,
+            0.04,
+            wall_thickness,
+            entrance_segment,
+            0.08,
+            wall_color,
+        )
+        self._append_cube_marker(
+            markers,
+            stamp,
+            'task_field_wall',
+            5,
+            field_min_x - wall_thickness * 0.5,
+            field_max_y - entrance_segment * 0.5,
+            0.04,
+            wall_thickness,
+            entrance_segment,
+            0.08,
+            wall_color,
+        )
+
+        self._append_cube_marker(
+            markers,
+            stamp,
+            'task_field_start',
+            3,
+            0.0,
+            0.0,
+            0.015,
+            start_size,
+            start_size,
+            0.03,
+            (1.0, 0.95, 0.0, 0.18),
+        )
+        self._append_text_marker(
+            markers,
+            stamp,
+            'task_field_text',
+            3,
+            0.0,
+            -0.62,
+            0.18,
+            'START',
+            0.18,
+            (1.0, 0.95, 0.0, 1.0),
+        )
+
+        self._append_text_marker(
+            markers,
+            stamp,
+            'task_field_dimension_text',
+            1,
+            field_center_x,
+            field_max_y + 0.35,
+            0.18,
+            'TASK FIELD 6.000m x 4.000m',
+            0.16,
+            (0.0, 0.0, 0.0, 1.0),
+        )
+        self._append_text_marker(
+            markers,
+            stamp,
+            'task_field_dimension_text',
+            2,
+            field_min_x - 0.35,
+            field_center_y,
+            0.18,
+            '6.000m',
+            0.14,
+            (0.0, 0.0, 0.0, 1.0),
+        )
+        self._append_text_marker(
+            markers,
+            stamp,
+            'task_field_dimension_text',
+            3,
+            0.0,
+            0.62,
+            0.18,
+            'START 1.000m x 1.000m',
+            0.12,
+            (0.0, 0.0, 0.0, 1.0),
+        )
+
+        stripe_count = 14
+        stripe_width_y = (field_max_y - field_min_y) / stripe_count
+        for i in range(stripe_count):
+            y = field_min_y + stripe_width_y * (i + 0.5)
+            color = (1.0, 0.85, 0.0, 0.75) if i % 2 == 0 else (0.02, 0.02, 0.02, 0.75)
+            self._append_cube_marker(
+                markers,
+                stamp,
+                'task_field_speed_bump',
+                10 + i,
+                speed_bump_x,
+                y,
+                0.035,
+                speed_bump_width,
+                stripe_width_y,
+                0.07,
+                color,
+            )
+        self._append_text_marker(
+            markers,
+            stamp,
+            'task_field_text',
+            4,
+            speed_bump_x,
+            -1.75,
+            0.22,
+            'SPEED BUMP',
+            0.14,
+            (0.0, 0.0, 0.0, 1.0),
+        )
+        self._append_text_marker(
+            markers,
+            stamp,
+            'task_field_dimension_text',
+            4,
+            speed_bump_x,
+            1.75,
+            0.22,
+            '2.500m FROM FAR WALL',
+            0.11,
+            (0.0, 0.0, 0.0, 1.0),
+        )
+
+        if self._publish_task_item_zones:
+            storage_size = 0.25
+            storage_center_spacing = storage_size + 0.60
+            storage_near_speed_bump_x = field_min_x + 1.35
+            storage_centers_x = [
+                storage_near_speed_bump_x,
+                storage_near_speed_bump_x + storage_center_spacing,
+            ]
+            storage_centers_y = [
+                1.275,
+                1.275 - storage_center_spacing,
+                1.275 - storage_center_spacing * 2.0,
+                1.275 - storage_center_spacing * 3.0,
+            ]
+            place_size = 0.40
+            place_gap = 0.40
+            place_center_spacing = place_size + place_gap
+            place_center_x = field_max_x - 1.00
+            place_centers_y = [
+                1.20,
+                1.20 - place_center_spacing,
+                1.20 - place_center_spacing * 2.0,
+                1.20 - place_center_spacing * 3.0,
+            ]
+            place_specs = [
+                ('FOOD_PLACE', '0 FOOD', place_centers_y[0], (0.22, 0.78, 0.18, 0.75)),
+                ('TOOL_PLACE', '1 TOOL', place_centers_y[1], (0.55, 0.55, 0.55, 0.75)),
+                ('INSTRUMENT_PLACE', '2 INST', place_centers_y[2], (0.1, 0.28, 0.78, 0.75)),
+                ('MEDICINE_PLACE', '3 MED', place_centers_y[3], (0.85, 0.05, 0.02, 0.75)),
+            ]
+            for i, (_name, label, y, color) in enumerate(place_specs):
+                self._append_cube_marker(
+                    markers,
+                    stamp,
+                    'task_field_place_zones',
+                    100 + i,
+                    place_center_x,
+                    y,
+                    0.02,
+                    place_size,
+                    place_size,
+                    0.04,
+                    color,
+                )
+                self._append_text_marker(
+                    markers,
+                    stamp,
+                    'task_field_text',
+                    100 + i,
+                    place_center_x,
+                    y,
+                    0.28,
+                    label,
+                    0.13,
+                    (1.0, 1.0, 1.0, 1.0),
+                )
+
+            storage_index = 0
+            for row_index, box_center_x in enumerate(storage_centers_x, start=1):
+                for col_index, box_center_y in enumerate(storage_centers_y, start=1):
+                    storage_index += 1
+                    self._append_cube_marker(
+                        markers,
+                        stamp,
+                        'task_field_storage_zones',
+                        200 + storage_index,
+                        box_center_x,
+                        box_center_y,
+                        0.025,
+                        storage_size,
+                        storage_size,
+                        0.05,
+                        (1.0, 1.0, 1.0, 0.70),
+                    )
+                    self._append_text_marker(
+                        markers,
+                        stamp,
+                        'task_field_text',
+                        200 + storage_index,
+                        box_center_x,
+                        box_center_y,
+                        0.22,
+                        f'R{row_index}C{col_index}',
+                        0.095,
+                        (0.0, 0.0, 0.0, 1.0),
+                    )
+        for i, wp in enumerate([wp for wp in self._waypoints if wp.name.endswith('_SCAN_PICK')]):
+            self._append_cube_marker(
+                markers,
+                stamp,
+                'task_field_pick_stops',
+                300 + i,
+                wp.x,
+                wp.y,
+                0.03,
+                0.08,
+                0.08,
+                0.06,
+                (0.0, 0.25, 1.0, 0.65),
+            )
+
     def _publish_visualization(self) -> None:
-        if not self._waypoints:
+        if not self._waypoints and not self._publish_field_layout:
             return
 
         stamp = self.get_clock().now().to_msg()
@@ -668,6 +1615,9 @@ class PresetWaypointMission(Node):
         clear.type = Marker.SPHERE
         clear.action = Marker.DELETEALL
         markers.markers.append(clear)
+
+        if self._publish_field_layout:
+            self._append_field_layout_markers(markers, stamp)
 
         line = Marker()
         line.header.stamp = stamp
@@ -759,6 +1709,8 @@ class PresetWaypointMission(Node):
             label = f'{i + 1:02d}:{wp.name}'
             if wp.yolo.enabled:
                 label += ' [YOLO]'
+            if wp.arm.enabled:
+                label += f' [ARM:{wp.arm.state}]'
             text.text = label
             markers.markers.append(text)
 

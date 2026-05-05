@@ -1,37 +1,35 @@
-# 预设点任务清单（map 坐标系，单位：米）
-# 使用方法：
-# 1) 按实际地图填写 x / y / yaw_deg
-# 2) 将需要执行的点位 enabled 改为 true
-# 3) 顶层 yolo 配置统一设置识别参数
-# 4) 每个航点只写 yolo: true / false 控制是否到点开启识别
-# 5) 通过 launch 参数 start_preset_mission:=true 启动任务
+# 任务赛预设点占位模板（map 坐标系，单位：米）
 #
+# 规则来源：/home/orangepi/2026年仿生足式机器人挑战赛-V2.0.pdf
+#
+# 坐标约定：
+# - 机器人在启动区中心开机/启动 SLAM，该点就是 map 原点 (0, 0)。
+# - 启动时机器人朝向为 0 度，+x 指向任务场内部/智力题显示区，+y 指向机器人左侧。
+# - 任务场本体按规则为 6.0m x 4.0m。
+# - 当前参考布局把启动区中心放在 (0, 0)，启动区前边界为 x=0.50；
+#   因此任务场本体边界为 x=0.50~6.50, y=-2.00~2.00。
+#
+# 使用方法：
+# - 你自己填写 USER_GOAL_xx 的 x / y / yaw_deg。
+# - 需要执行的点再把 enabled 改成 true。
+# - 默认所有点都是 enabled: false，不会自动发送任何目标点。
+# - 如果只想在 RViz 里手动点 2D Goal，可以保持本文件全禁用。
+
 yolo:
-  settle_sec: 1.0    #到点以后等待多久开始统计识别结果
-  timeout_sec: 4.0   #识别窗口持续时间
-  min_score: 0.5     #置信度阈值
+  settle_sec: 0.8
+  timeout_sec: 3.0
+  min_score: 0.5
+
+# 不在这里预设放置目标点。后续如果要用自动取放流程，再按你的实测点位填写。
+place_targets: {}
 
 waypoints:
-  - {name: P01, x: 0.0, y: 0.0, yaw_deg: 0.0, enabled: true, yolo: false}
-  - {name: P02, x: 4.0, y: 0.0, yaw_deg: 0.0, enabled: true, yolo: false}
-  - {name: P03, x: 4.0, y: 0.0, yaw_deg: -90.0, enabled: true, yolo: true}
-  - {name: P04, x: 1.8, y: 0.0, yaw_deg: 0.0, enabled: false, yolo: false}
-  - {name: P05, x: 2.4, y: 0.0, yaw_deg: 0.0, enabled: false, yolo: false}
+  # 起点只作坐标参考，不发送给 Nav2。
+  - {name: START_CENTER_REFERENCE, x: 0.09, y: 0.00, yaw_deg: 0.0, enabled: false, yolo: false, arm: none}
 
-  - {name: P06, x: 2.4, y: 0.6, yaw_deg: 90.0, enabled: false, yolo: false}
-  - {name: P07, x: 2.4, y: 1.2, yaw_deg: 90.0, enabled: false, yolo: false}
-  - {name: P08, x: 2.4, y: 1.8, yaw_deg: 90.0, enabled: false, yolo: false}
-  - {name: P09, x: 2.4, y: 2.4, yaw_deg: 90.0, enabled: false, yolo: false}
-  - {name: P10, x: 2.4, y: 3.0, yaw_deg: 90.0, enabled: false, yolo: false}
-
-  - {name: P11, x: 1.8, y: 3.0, yaw_deg: 180.0, enabled: false, yolo: false}
-  - {name: P12, x: 1.2, y: 3.0, yaw_deg: 180.0, enabled: false, yolo: false}
-  - {name: P13, x: 0.6, y: 3.0, yaw_deg: 180.0, enabled: false, yolo: false}
-  - {name: P14, x: 0.0, y: 3.0, yaw_deg: 180.0, enabled: false, yolo: false}
-  - {name: P15, x: -0.6, y: 3.0, yaw_deg: 180.0, enabled: false, yolo: false}
-
-  - {name: P16, x: -0.6, y: 2.4, yaw_deg: -90.0, enabled: false, yolo: false}
-  - {name: P17, x: -0.6, y: 1.8, yaw_deg: -90.0, enabled: false, yolo: false}
-  - {name: P18, x: -0.6, y: 1.2, yaw_deg: -90.0, enabled: false, yolo: false}
-  - {name: P19, x: -0.6, y: 0.6, yaw_deg: -90.0, enabled: false, yolo: false}
-  - {name: P20, x: -0.6, y: 0.0, yaw_deg: -90.0, enabled: false, yolo: false}
+  # 预留给你自己填的目标点。
+  - {name: USER_GOAL_01, x: 1.25, y: 0.40, yaw_deg: 0.0, enabled: true, yolo: false, arm: none}
+  - {name: USER_GOAL_02, x: 1.50, y: 0.40, yaw_deg: 0.0, enabled: true, yolo: false, arm: pick}
+  - {name: USER_GOAL_03, x: 0.00, y: 0.00, yaw_deg: 0.0, enabled: false, yolo: false, arm: none}
+  - {name: USER_GOAL_04, x: 0.00, y: 0.00, yaw_deg: 0.0, enabled: false, yolo: false, arm: none}
+  - {name: USER_GOAL_05, x: 0.00, y: 0.00, yaw_deg: 0.0, enabled: false, yolo: false, arm: none}

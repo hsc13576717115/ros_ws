@@ -70,6 +70,15 @@ namespace lslidar_driver
 		compensation = true;
 		pubScan = true;
 		pubPointCloud2 = true;
+		self_filter_enabled = true;
+		self_filter_laser_x = -0.12102;
+		self_filter_laser_y = 0.0;
+		self_filter_laser_yaw_deg = 180.0;
+		self_filter_radius = 0.60;
+		self_filter_min_x = -0.40;
+		self_filter_max_x = 0.40;
+		self_filter_min_y = -0.227;
+		self_filter_max_y = 0.227;
 		angle_disable_min = 0.0;
 		angle_disable_max = 0.0;
 
@@ -84,6 +93,15 @@ namespace lslidar_driver
 		this->declare_parameter<bool>("compensation", false);
 		this->declare_parameter<bool>("pubScan", true);
 		this->declare_parameter<bool>("pubPointCloud2", false);
+		this->declare_parameter<bool>("self_filter_enabled", true);
+		this->declare_parameter<double>("self_filter_laser_x", -0.12102);
+		this->declare_parameter<double>("self_filter_laser_y", 0.0);
+		this->declare_parameter<double>("self_filter_laser_yaw_deg", 180.0);
+		this->declare_parameter<double>("self_filter_radius", 0.60);
+		this->declare_parameter<double>("self_filter_min_x", -0.40);
+		this->declare_parameter<double>("self_filter_max_x", 0.40);
+		this->declare_parameter<double>("self_filter_min_y", -0.227);
+		this->declare_parameter<double>("self_filter_max_y", 0.227);
 		this->declare_parameter<double>("angle_disable_min", 0.0);
 		this->declare_parameter<double>("angle_disable_max", 0.0);
 		this->declare_parameter<std::string>("interface_selection", "net");
@@ -99,6 +117,15 @@ namespace lslidar_driver
 		this->get_parameter("pointcloud_topic", pointcloud_topic);
 		this->get_parameter("pubScan", pubScan);
 		this->get_parameter("pubPointCloud2", pubPointCloud2);
+		this->get_parameter("self_filter_enabled", self_filter_enabled);
+		this->get_parameter("self_filter_laser_x", self_filter_laser_x);
+		this->get_parameter("self_filter_laser_y", self_filter_laser_y);
+		this->get_parameter("self_filter_laser_yaw_deg", self_filter_laser_yaw_deg);
+		this->get_parameter("self_filter_radius", self_filter_radius);
+		this->get_parameter("self_filter_min_x", self_filter_min_x);
+		this->get_parameter("self_filter_max_x", self_filter_max_x);
+		this->get_parameter("self_filter_min_y", self_filter_min_y);
+		this->get_parameter("self_filter_max_y", self_filter_max_y);
 		this->get_parameter("angle_disable_min", angle_disable_min);
 		this->get_parameter("angle_disable_max", angle_disable_max);
 		this->get_parameter("interface_selection", interface_selection);
@@ -232,6 +259,32 @@ namespace lslidar_driver
 			point_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>(pointcloud_topic, 10);
 		difop_switch = this->create_subscription<std_msgs::msg::Int8>("lslidar_order", 1, std::bind(&LslidarDriver::lidar_order, this, std::placeholders::_1)); // 转速输入
 		return true;
+	}
+
+	bool LslidarDriver::isPointInsideSelfFilter(double range, double angle_rad) const
+	{
+		if (!self_filter_enabled || !std::isfinite(range) || range < min_range || range > max_range)
+		{
+			return false;
+		}
+
+		const double yaw = self_filter_laser_yaw_deg * M_PI / 180.0;
+		const double laser_point_x = range * std::cos(angle_rad);
+		const double laser_point_y = range * std::sin(angle_rad);
+		const double base_point_x =
+			self_filter_laser_x + std::cos(yaw) * laser_point_x - std::sin(yaw) * laser_point_y;
+		const double base_point_y =
+			self_filter_laser_y + std::sin(yaw) * laser_point_x + std::cos(yaw) * laser_point_y;
+
+		const bool inside_radius =
+			self_filter_radius > 0.0 &&
+			(base_point_x * base_point_x + base_point_y * base_point_y) <=
+				(self_filter_radius * self_filter_radius);
+		const bool inside_body_box =
+			base_point_x >= self_filter_min_x && base_point_x <= self_filter_max_x &&
+			base_point_y >= self_filter_min_y && base_point_y <= self_filter_max_y;
+
+		return inside_radius || inside_body_box;
 	}
 
 	void LslidarDriver::lidar_difop()
@@ -994,6 +1047,10 @@ namespace lslidar_driver
 					for (int i = 0; i < count_num; i++)
 					{
 						int point_idx = round((360 - points[i].degree) * count_num / 360);
+						if (point_idx >= scan_num)
+							point_idx -= scan_num;
+						if (point_idx < 0 || point_idx >= scan_num)
+							continue;
 						if (points[i].range == 0.0)
 						{
 							scan->ranges[point_idx] = std::numeric_limits<float>::infinity();
@@ -1002,8 +1059,18 @@ namespace lslidar_driver
 						else
 						{
 							double dist = points[i].range;
-							scan->ranges[point_idx] = (float)dist;
-							scan->intensities[point_idx] = points[i].intensity;
+							const double angle_rad =
+								scan->angle_min + point_idx * scan->angle_increment;
+							if (isPointInsideSelfFilter(dist, angle_rad))
+							{
+								scan->ranges[point_idx] = std::numeric_limits<float>::infinity();
+								scan->intensities[point_idx] = 0;
+							}
+							else
+							{
+								scan->ranges[point_idx] = (float)dist;
+								scan->intensities[point_idx] = points[i].intensity;
+							}
 						}
 						
 						if(truncated_mode_){
@@ -1161,9 +1228,19 @@ namespace lslidar_driver
 						else
 						{
 							double dist = points[i].range;
-							scan->ranges[point_idx] = (float)dist;
+							const double angle_rad =
+								scan->angle_min + point_idx * scan->angle_increment;
+							if (isPointInsideSelfFilter(dist, angle_rad))
+							{
+								scan->ranges[point_idx] = std::numeric_limits<float>::infinity();
+								scan->intensities[point_idx] = 0;
+							}
+							else
+							{
+								scan->ranges[point_idx] = (float)dist;
+								scan->intensities[point_idx] = points[i].intensity;
+							}
 						}
-						scan->intensities[point_idx] = points[i].intensity;
 						
 					if(truncated_mode_){
 						int len=sizeof(scan_crop_max) / sizeof(scan_crop_max[0]) ;

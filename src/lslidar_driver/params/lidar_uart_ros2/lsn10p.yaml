@@ -3,7 +3,7 @@
     frame_id: laser                                       #激光坐标（与TF树匹配）
     group_ip: 224.1.1.2
     add_multicast: false 
-    device_ip: 192.168.1.200                   	            #雷达源IP
+    device_ip: 192.168.1.200                                #雷达源IP
     device_ip_difop: 192.168.1.102                          #雷达目的ip
     msop_port: 2368                                         #雷达目的端口号
     difop_port: 2369                                        #雷达源端口号
@@ -12,12 +12,21 @@
     angle_disable_max: 0.0                                  #角度裁剪结束值
     min_range: 0.2                                          #雷达接收距离最小值
     max_range: 200.0                                        #雷达接收距离最大值
+    self_filter_enabled: true                               #按 base_link 机体区域过滤自身腿/机械臂点
+    self_filter_laser_x: -0.12102                           #雷达相对机体中心后移 121.02mm
+    self_filter_laser_y: 0.0
+    self_filter_laser_yaw_deg: 180.0
+    self_filter_radius: 0.60                                #以 base_link/机体中心为圆心，过滤半径 60cm 内点
+    self_filter_min_x: -0.40                                #机体 800mm，base_link x 最小值
+    self_filter_max_x: 0.40                                 #机体 800mm，base_link x 最大值
+    self_filter_min_y: -0.227                               #机体 454mm，base_link y 最小值
+    self_filter_max_y: 0.227                                #机体 454mm，base_link y 最大值
     use_gps_ts: false                                       #雷达是否使用GPS授时
     scan_topic: /scan                                       #设置激光数据topic名称
     interface_selection: serial                             #接口选择:net 为网口,serial 为串口。
     serial_port_: /dev/ttyS4                                #串口连接时的串口号
     high_reflection: false                                  #M10_P雷达需填写该值,若不确定，请联系技术支持。
-    compensation: false				                              #M10系列是否使用角度补偿功能
+    compensation: false                                      #M10系列是否使用角度补偿功能
     pubScan: true                                           #是否发布scan话题
     pubPointCloud2: false                                    #是否发布pointcloud2话题
     pointcloud_topic: /lslidar_point_cloud                  #设置激光数据topic名称
