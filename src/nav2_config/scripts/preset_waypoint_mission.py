@@ -17,7 +17,7 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.time import Time
 from r2_arm_control.srv import SetArmState
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Int32, String
 from tf2_ros import Buffer, TransformException, TransformListener
 from vision_msgs.msg import Detection2DArray
 from visualization_msgs.msg import Marker, MarkerArray
@@ -40,12 +40,21 @@ class ArmTask:
 
 
 @dataclass
+class PlaceViaPoint:
+    name: str
+    x: float
+    y: float
+    yaw: Optional[float] = None
+
+
+@dataclass
 class PlaceTask:
     enabled: bool = False
     target: str = 'auto'
     transfer_x: float = 3.85
     side_aisle_y: float = 1.55
     return_to_next_pick: bool = True
+    via_points: List[PlaceViaPoint] = field(default_factory=list)
 
 
 @dataclass
@@ -63,6 +72,10 @@ class Waypoint:
     x: float
     y: float
     yaw: float
+    standoff_m: float = 0.0
+    approach_yaw: Optional[float] = None
+    carry_mode: str = ''
+    target_class: str = ''
     yolo: YoloTask = field(default_factory=YoloTask)
     arm: ArmTask = field(default_factory=ArmTask)
     place: PlaceTask = field(default_factory=PlaceTask)
@@ -120,6 +133,7 @@ class PresetWaypointMission(Node):
         self.declare_parameter('yolo_detection_topic', '/yolo/detections')
         self.declare_parameter('yolo_result_topic', '/preset_yolo_result')
         self.declare_parameter('yolo_result_text_scale', 0.14)
+        self.declare_parameter('high_score_zone_topic', '/mission/high_score_zone')
         self.declare_parameter('arm_state_service_name', '/r2/arm/set_state')
         self.declare_parameter('arm_state_topic', '/r2/arm/state_machine_state')
         self.declare_parameter('arm_default_timeout_sec', 20.0)
@@ -179,6 +193,9 @@ class PresetWaypointMission(Node):
         yolo_enable_topic = str(self.get_parameter('yolo_enable_topic').value)
         yolo_detection_topic = str(self.get_parameter('yolo_detection_topic').value)
         yolo_result_topic = str(self.get_parameter('yolo_result_topic').value)
+        high_score_zone_topic = str(
+            self.get_parameter('high_score_zone_topic').value
+        )
         arm_state_service_name = str(
             self.get_parameter('arm_state_service_name').value
         )
@@ -197,6 +214,12 @@ class PresetWaypointMission(Node):
             yolo_detection_topic,
             self._yolo_detection_callback,
             20,
+        )
+        self._high_score_zone_sub = self.create_subscription(
+            Int32,
+            high_score_zone_topic,
+            self._high_score_zone_callback,
+            10,
         )
         self._arm_state_sub = self.create_subscription(
             String,
@@ -231,6 +254,8 @@ class PresetWaypointMission(Node):
         self._yolo_result_by_waypoint: Dict[str, str] = {}
         self._yolo_has_detection_by_waypoint: Dict[str, bool] = {}
         self._yolo_best_class_by_waypoint: Dict[str, str] = {}
+        self._last_detected_class_global: str = ''
+        self._high_score_zone: int = -1
         self._yolo_default_task = YoloTask()
         self._arm_task_active = False
         self._arm_task_index: Optional[int] = None
@@ -250,7 +275,8 @@ class PresetWaypointMission(Node):
         self.get_logger().info(
             f'Preset waypoint mission ready. waypoints={len(self._waypoints)}, '
             f'action={self._action_name}, spin_action={self._spin_action_name}, '
-            f'frame={self._frame_id}, auto_start={self._auto_start}'
+            f'frame={self._frame_id}, auto_start={self._auto_start}, '
+            f'high_score_zone_topic={high_score_zone_topic}'
         )
 
     def _now_sec(self) -> float:
@@ -341,6 +367,32 @@ class PresetWaypointMission(Node):
             continue_on_failure=continue_on_failure,
         )
 
+    def _parse_place_via_points(self, raw_cfg: dict) -> List[PlaceViaPoint]:
+        raw_via = raw_cfg.get('via', raw_cfg.get('via_points', []))
+        if not isinstance(raw_via, list):
+            return []
+
+        via_points: List[PlaceViaPoint] = []
+        for i, raw_point in enumerate(raw_via):
+            if not isinstance(raw_point, dict):
+                self.get_logger().warn(f'Skip invalid place via point at index {i}.')
+                continue
+            try:
+                x = float(raw_point['x'])
+                y = float(raw_point['y'])
+                if 'yaw' in raw_point:
+                    yaw = float(raw_point['yaw'])
+                elif 'yaw_deg' in raw_point:
+                    yaw = math.radians(float(raw_point['yaw_deg']))
+                else:
+                    yaw = None
+            except Exception:
+                self.get_logger().warn(f'Skip invalid place via point at index {i}.')
+                continue
+            name = str(raw_point.get('name', f'VIA_{i + 1:02d}')).strip()
+            via_points.append(PlaceViaPoint(name or f'VIA_{i + 1:02d}', x, y, yaw))
+        return via_points
+
     def _parse_place_task(self, item: dict) -> PlaceTask:
         raw_cfg = item.get('place', item.get('place_after_pick', False))
         enabled = False
@@ -348,6 +400,7 @@ class PresetWaypointMission(Node):
         transfer_x = 3.85
         side_aisle_y = 1.55
         return_to_next_pick = True
+        via_points: List[PlaceViaPoint] = []
 
         if isinstance(raw_cfg, dict):
             enabled = self._to_bool(raw_cfg.get('enabled', False))
@@ -357,6 +410,7 @@ class PresetWaypointMission(Node):
             return_to_next_pick = self._to_bool(
                 raw_cfg.get('return_to_next_pick', return_to_next_pick)
             )
+            via_points = self._parse_place_via_points(raw_cfg)
         elif isinstance(raw_cfg, str):
             target = raw_cfg.strip()
             enabled = target.lower() not in ('', 'none', 'false', 'off', 'skip', 'null')
@@ -372,7 +426,94 @@ class PresetWaypointMission(Node):
             transfer_x=transfer_x,
             side_aisle_y=side_aisle_y,
             return_to_next_pick=return_to_next_pick,
+            via_points=via_points,
         )
+
+    def _apply_waypoint_role_defaults(self, item: dict) -> dict:
+        role = str(
+            item.get('role', item.get('type', item.get('kind', '')))
+        ).strip().lower()
+        if not role:
+            return item
+
+        cfg = dict(item)
+
+        def set_if_missing(key: str, value) -> None:
+            if key not in cfg:
+                cfg[key] = value
+
+        def has_any_key(*keys: str) -> bool:
+            return any(key in cfg for key in keys)
+
+        if role in ('observe', 'scan', 'yolo'):
+            set_if_missing('carry_mode', 'empty')
+            if not has_any_key('yolo', 'yolo_enabled'):
+                cfg['yolo'] = True
+            if not has_any_key('arm', 'arm_state'):
+                cfg['arm'] = 'none'
+            if not has_any_key('place', 'place_after_pick'):
+                cfg['place'] = False
+        elif role in ('pick', 'pickup', 'grab'):
+            set_if_missing('carry_mode', 'empty')
+            if not has_any_key('yolo', 'yolo_enabled'):
+                cfg['yolo'] = False
+            if not has_any_key('arm', 'arm_state'):
+                cfg['arm'] = 'pick'
+            if not has_any_key('place', 'place_after_pick'):
+                cfg['place'] = False
+        elif role in ('pick_auto_place', 'pick_place'):
+            set_if_missing('carry_mode', 'empty')
+            if not has_any_key('yolo', 'yolo_enabled'):
+                cfg['yolo'] = False
+            if not has_any_key('arm', 'arm_state'):
+                cfg['arm'] = 'pick'
+            if not has_any_key('place', 'place_after_pick'):
+                cfg['place'] = {
+                    'enabled': True,
+                    'target': str(cfg.get('target', 'auto')).strip() or 'auto',
+                    'transfer_x': float(cfg.get('transfer_x', 3.85)),
+                    'side_aisle_y': float(cfg.get('side_aisle_y', 1.55)),
+                    'return_to_next_pick': self._to_bool(
+                        cfg.get('return_to_next_pick', True)
+                    ),
+                }
+        elif role in ('carry', 'via', 'carry_via', 'transfer', 'approach_place'):
+            set_if_missing('carry_mode', 'carry')
+            if not has_any_key('yolo', 'yolo_enabled'):
+                cfg['yolo'] = False
+            if not has_any_key('arm', 'arm_state'):
+                cfg['arm'] = 'none'
+            if not has_any_key('place', 'place_after_pick'):
+                cfg['place'] = False
+        elif role in ('place', 'place_auto', 'drop'):
+            set_if_missing('carry_mode', 'place')
+            if not has_any_key('yolo', 'yolo_enabled'):
+                cfg['yolo'] = False
+            if not has_any_key('arm', 'arm_state'):
+                cfg['arm'] = 'place'
+            if not has_any_key('place', 'place_after_pick'):
+                cfg['place'] = {
+                    'enabled': True,
+                    'target': str(cfg.get('target', 'auto')).strip() or 'auto',
+                }
+        elif role in ('return', 'empty', 'exit', 'transit'):
+            set_if_missing('carry_mode', 'empty')
+            if not has_any_key('yolo', 'yolo_enabled'):
+                cfg['yolo'] = False
+            if not has_any_key('arm', 'arm_state'):
+                cfg['arm'] = 'none'
+            if not has_any_key('place', 'place_after_pick'):
+                cfg['place'] = False
+        elif role == 'store':
+            set_if_missing('carry_mode', 'carry')
+            if not has_any_key('yolo', 'yolo_enabled'):
+                cfg['yolo'] = False
+            if not has_any_key('arm', 'arm_state'):
+                cfg['arm'] = 'store'
+            if not has_any_key('place', 'place_after_pick'):
+                cfg['place'] = False
+
+        return cfg
 
     @staticmethod
     def _normalize_class_key(value: str) -> str:
@@ -450,6 +591,7 @@ class PresetWaypointMission(Node):
         for i, item in enumerate(raw_items):
             if not isinstance(item, dict):
                 continue
+            item = self._apply_waypoint_role_defaults(item)
             if not self._to_bool(item.get('enabled', True)):
                 continue
             try:
@@ -459,6 +601,13 @@ class PresetWaypointMission(Node):
                     yaw = float(item['yaw'])
                 else:
                     yaw = math.radians(float(item.get('yaw_deg', 0.0)))
+                if 'approach_yaw' in item:
+                    approach_yaw = float(item['approach_yaw'])
+                elif 'approach_yaw_deg' in item:
+                    approach_yaw = math.radians(float(item['approach_yaw_deg']))
+                else:
+                    approach_yaw = None
+                standoff_m = max(0.0, float(item.get('standoff_m', 0.0)))
             except Exception:
                 self.get_logger().warn(f'Skip invalid waypoint at index {i}.')
                 continue
@@ -469,6 +618,10 @@ class PresetWaypointMission(Node):
                     x=x,
                     y=y,
                     yaw=yaw,
+                    standoff_m=standoff_m,
+                    approach_yaw=approach_yaw,
+                    carry_mode=str(item.get('carry_mode', '')).strip().lower(),
+                    target_class=str(item.get('target_class', '')).strip(),
                     yolo=self._parse_yolo_task(item),
                     arm=self._parse_arm_task(item),
                     place=self._parse_place_task(item),
@@ -477,14 +630,39 @@ class PresetWaypointMission(Node):
 
         return waypoints
 
+    @staticmethod
+    def _effective_yaw(wp: Waypoint) -> float:
+        return wp.approach_yaw if wp.approach_yaw is not None else wp.yaw
+
     def _build_pose(self, wp: Waypoint) -> PoseStamped:
+        x, y = wp.x, wp.y
+        yaw = self._effective_yaw(wp)
+
+        # 如果航点是 place 且 target 为 auto/detected，动态解析放置坐标
+        # 支持 "observe → pick → nav → place" 分离流程：place 坐标根据最近一次 YOLO 结果确定
+        if wp.arm.state == 'place' and wp.place.enabled:
+            target_key = wp.place.target.strip().lower()
+            if target_key in ('auto', 'detected'):
+                target = self._resolve_place_target(wp)
+                if target is not None:
+                    x, y, yaw = target.x, target.y, target.yaw
+                    self.get_logger().info(
+                        f'Dynamic place for {wp.name}: target={target.name}, '
+                        f'pos=({x:.3f}, {y:.3f}), yaw={math.degrees(yaw):.1f}°'
+                    )
+                else:
+                    self.get_logger().warn(
+                        f'Failed to resolve dynamic place target for {wp.name}, '
+                        f'using configured coordinates ({wp.x:.3f}, {wp.y:.3f}).'
+                    )
+
         pose = PoseStamped()
         pose.header.stamp = self.get_clock().now().to_msg()
         pose.header.frame_id = self._frame_id
-        pose.pose.position.x = wp.x
-        pose.pose.position.y = wp.y
+        pose.pose.position.x = x
+        pose.pose.position.y = y
         pose.pose.position.z = 0.0
-        qz, qw = yaw_to_quat_z_w(wp.yaw)
+        qz, qw = yaw_to_quat_z_w(yaw)
         pose.pose.orientation.z = qz
         pose.pose.orientation.w = qw
         return pose
@@ -515,7 +693,15 @@ class PresetWaypointMission(Node):
                 f'Place target "{target_key}" from waypoint {wp.name} is not configured.'
             )
 
-        detected_class = self._yolo_best_class_by_waypoint.get(wp.name, '')
+        # 1) 显式 target_class 优先，适合赛前已知箱子类别或复盘调试。
+        detected_class = wp.target_class
+        # 2) 再尝试当前航点自己的 YOLO 检测结果。
+        if not detected_class:
+            detected_class = self._yolo_best_class_by_waypoint.get(wp.name, '')
+        # 3) 如果当前航点没有做过 YOLO，回退到最近一次检测（支持 observe → pick → ... → place 分离流程）。
+        if not detected_class:
+            detected_class = self._last_detected_class_global
+
         mapped_name = self._class_alias_to_place_target.get(
             self._normalize_class_key(detected_class)
         )
@@ -542,16 +728,28 @@ class PresetWaypointMission(Node):
         y: float,
         yaw: float,
         arm_state: str = '',
+        carry_mode: str = '',
+        target_class: str = '',
     ) -> Waypoint:
         return Waypoint(
             name=name,
             x=x,
             y=y,
             yaw=yaw,
+            carry_mode=carry_mode,
+            target_class=target_class,
             yolo=YoloTask(enabled=False),
             arm=ArmTask(enabled=bool(arm_state), state=arm_state),
             place=PlaceTask(enabled=False),
         )
+
+    @staticmethod
+    def _safe_waypoint_suffix(value: str, fallback: str) -> str:
+        suffix = ''.join(
+            char.upper() if char.isalnum() else '_'
+            for char in str(value).strip()
+        ).strip('_')
+        return suffix or fallback
 
     def _insert_dynamic_place_route(self, wp: Waypoint) -> bool:
         if not wp.place.enabled or wp.name in self._dynamic_place_inserted_for:
@@ -580,24 +778,52 @@ class PresetWaypointMission(Node):
                 wp.y,
                 wp.yaw,
                 'store',
+                carry_mode='carry',
+                target_class=wp.target_class,
             )
         )
-        route.append(
-            self._make_waypoint(
-                f'{wp.name}_TO_TRANSFER',
-                transfer_x,
-                wp.y,
-                self._heading_from_delta(transfer_x - wp.x, 0.0, wp.yaw),
+
+        if wp.place.via_points:
+            for i, via in enumerate(wp.place.via_points):
+                if i + 1 < len(wp.place.via_points):
+                    next_x = wp.place.via_points[i + 1].x
+                    next_y = wp.place.via_points[i + 1].y
+                else:
+                    next_x = target.x
+                    next_y = target.y
+                route.append(
+                    self._make_waypoint(
+                        f'{wp.name}_{self._safe_waypoint_suffix(via.name, f"VIA_{i + 1:02d}")}',
+                        via.x,
+                        via.y,
+                        via.yaw
+                        if via.yaw is not None
+                        else self._heading_from_delta(next_x - via.x, next_y - via.y, wp.yaw),
+                        carry_mode='carry',
+                        target_class=target.name,
+                    )
+                )
+        else:
+            route.append(
+                self._make_waypoint(
+                    f'{wp.name}_TRANSFER',
+                    transfer_x,
+                    wp.y,
+                    self._heading_from_delta(transfer_x - wp.x, 0.0, wp.yaw),
+                    carry_mode='carry',
+                    target_class=target.name,
+                )
             )
-        )
-        route.append(
-            self._make_waypoint(
-                f'{wp.name}_ALIGN_{target.name}',
-                transfer_x,
-                target.y,
-                self._heading_from_delta(0.0, target.y - wp.y, 0.0),
+            route.append(
+                self._make_waypoint(
+                    f'{wp.name}_ALIGN_PLACE_{target.name}',
+                    transfer_x,
+                    target.y,
+                    self._heading_from_delta(0.0, target.y - wp.y, 0.0),
+                    carry_mode='carry',
+                    target_class=target.name,
+                )
             )
-        )
         route.append(
             self._make_waypoint(
                 f'{wp.name}_PLACE_{target.name}',
@@ -605,6 +831,8 @@ class PresetWaypointMission(Node):
                 target.y,
                 target.yaw,
                 'place',
+                carry_mode='place',
+                target_class=target.name,
             )
         )
 
@@ -615,6 +843,8 @@ class PresetWaypointMission(Node):
                     transfer_x,
                     target.y,
                     self._heading_from_delta(transfer_x - target.x, 0.0, target.yaw),
+                    carry_mode='empty',
+                    target_class=target.name,
                 )
             )
             route.append(
@@ -623,6 +853,7 @@ class PresetWaypointMission(Node):
                     transfer_x,
                     side_aisle_y,
                     self._heading_from_delta(0.0, side_aisle_y - target.y, 0.0),
+                    carry_mode='empty',
                 )
             )
             route.append(
@@ -631,6 +862,7 @@ class PresetWaypointMission(Node):
                     next_wp.x,
                     side_aisle_y,
                     self._heading_from_delta(next_wp.x - transfer_x, 0.0, math.pi),
+                    carry_mode='empty',
                 )
             )
             route.append(
@@ -639,6 +871,7 @@ class PresetWaypointMission(Node):
                     next_wp.x,
                     next_wp.y,
                     self._heading_from_delta(0.0, next_wp.y - side_aisle_y, 0.0),
+                    carry_mode='empty',
                 )
             )
 
@@ -658,7 +891,9 @@ class PresetWaypointMission(Node):
 
         current = self._waypoints[self._index]
         position_delta = math.hypot(current.x - previous.x, current.y - previous.y)
-        yaw_delta = abs(normalize_angle(current.yaw - previous.yaw))
+        yaw_delta = abs(
+            normalize_angle(self._effective_yaw(current) - self._effective_yaw(previous))
+        )
         return (
             position_delta <= self._same_position_tolerance
             and yaw_delta > self._same_yaw_tolerance
@@ -709,7 +944,7 @@ class PresetWaypointMission(Node):
 
         robot_x, robot_y, robot_yaw = pose
         xy_delta = math.hypot(wp.x - robot_x, wp.y - robot_y)
-        yaw_delta = abs(normalize_angle(wp.yaw - robot_yaw))
+        yaw_delta = abs(normalize_angle(self._effective_yaw(wp) - robot_yaw))
         if (
             xy_delta <= self._already_reached_xy_tolerance
             and yaw_delta <= self._already_reached_yaw_tolerance
@@ -758,6 +993,26 @@ class PresetWaypointMission(Node):
         self._yolo_enable_pub.publish(msg)
         self.get_logger().info(
             f'YOLO detection {"enabled" if enabled else "disabled"} for mission flow.'
+        )
+
+    def _high_score_zone_callback(self, msg: Int32) -> None:
+        zone = int(msg.data)
+        if zone < 0 or zone > 3:
+            if self._high_score_zone != -1:
+                self.get_logger().info('High-score zone cleared.')
+            self._high_score_zone = -1
+            return
+        if zone != self._high_score_zone:
+            self.get_logger().info(f'High-score zone updated: class_{zone}')
+        self._high_score_zone = zone
+
+    def _class_matches_high_score(self, class_id: str) -> bool:
+        if self._high_score_zone < 0:
+            return False
+        normalized = self._normalize_class_key(class_id)
+        return normalized in (
+            f'class{self._high_score_zone}',
+            str(self._high_score_zone),
         )
 
     def _tick(self) -> None:
@@ -880,7 +1135,8 @@ class PresetWaypointMission(Node):
         goal.pose = goal_pose
         self.get_logger().info(
             f'Sending waypoint [{self._index + 1}/{len(self._waypoints)}] '
-            f'{wp.name}: x={wp.x:.3f}, y={wp.y:.3f}, yaw={wp.yaw:.3f}'
+            f'{wp.name}: x={wp.x:.3f}, y={wp.y:.3f}, yaw={self._effective_yaw(wp):.3f}, '
+            f'carry_mode={wp.carry_mode or "none"}, target_class={wp.target_class or "auto"}'
         )
         future = self._action_client.send_goal_async(goal)
         future.add_done_callback(self._on_goal_response)
@@ -895,13 +1151,14 @@ class PresetWaypointMission(Node):
             return
 
         spin_goal = Spin.Goal()
-        spin_goal.target_yaw = float(normalize_angle(wp.yaw - robot_yaw))
+        target_yaw = self._effective_yaw(wp)
+        spin_goal.target_yaw = float(normalize_angle(target_yaw - robot_yaw))
         spin_goal.time_allowance = Duration(
             seconds=self._spin_time_allowance_sec
         ).to_msg()
         self.get_logger().info(
             f'Sending spin waypoint [{self._index + 1}/{len(self._waypoints)}] '
-            f'{wp.name}: x={wp.x:.3f}, y={wp.y:.3f}, target_yaw={wp.yaw:.3f}, '
+            f'{wp.name}: x={wp.x:.3f}, y={wp.y:.3f}, target_yaw={target_yaw:.3f}, '
             f'spin_delta={spin_goal.target_yaw:.3f}'
         )
         future = self._spin_action_client.send_goal_async(spin_goal)
@@ -1011,11 +1268,19 @@ class PresetWaypointMission(Node):
 
         self._yolo_result_by_waypoint[wp.name] = payload['summary']
         self._yolo_has_detection_by_waypoint[wp.name] = bool(payload['has_detection'])
-        self._yolo_best_class_by_waypoint[wp.name] = str(payload.get('best_class', ''))
+        best_class = str(payload.get('best_class', ''))
+        self._yolo_best_class_by_waypoint[wp.name] = best_class
+        if best_class:
+            self._last_detected_class_global = best_class
 
         if payload['has_detection']:
+            high_score_note = (
+                ' (high-score class)'
+                if self._class_matches_high_score(best_class)
+                else ''
+            )
             self.get_logger().info(
-                f'YOLO task finished at {wp.name}: {payload["summary"]}'
+                f'YOLO task finished at {wp.name}: {payload["summary"]}{high_score_note}'
             )
         else:
             self.get_logger().info(
@@ -1026,6 +1291,12 @@ class PresetWaypointMission(Node):
         self._yolo_task_index = None
         self._yolo_observations.clear()
         self._set_yolo_enabled(False)
+        if not payload['has_detection']:
+            self._mission_done = True
+            self.get_logger().error(
+                f'Mission stopped at {wp.name}: no box class detected, avoiding blind pick/place.'
+            )
+            return
         if wp.arm.enabled:
             self._start_arm_task(wp)
             return

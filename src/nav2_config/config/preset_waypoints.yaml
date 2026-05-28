@@ -1,35 +1,73 @@
-# 任务赛预设点占位模板（map 坐标系，单位：米）
-#
-# 规则来源：/home/orangepi/2026年仿生足式机器人挑战赛-V2.0.pdf
+# 任务赛预设航点配置（map 坐标系，单位：米）
 #
 # 坐标约定：
 # - 机器人在启动区中心开机/启动 SLAM，该点就是 map 原点 (0, 0)。
-# - 启动时机器人朝向为 0 度，+x 指向任务场内部/智力题显示区，+y 指向机器人左侧。
-# - 任务场本体按规则为 6.0m x 4.0m。
-# - 当前参考布局把启动区中心放在 (0, 0)，启动区前边界为 x=0.50；
-#   因此任务场本体边界为 x=0.50~6.50, y=-2.00~2.00。
+# - 启动时机器人朝向为 0 度，+x 指向任务场内部，+y 指向机器人左侧。
+# - 任务场本体参考边界：x=0.50~6.50, y=-2.00~2.00。
+# - 下方 pick/place 坐标都是机器人 base_link 的停靠点，不是箱子或归位区中心。
+# - 机械臂前向工作距离按 0.40m 估算；实测后只微调各停靠点 x/y/yaw。
 #
-# 使用方法：
-# - 你自己填写 USER_GOAL_xx 的 x / y / yaw_deg。
-# - 需要执行的点再把 enabled 改成 true。
-# - 默认所有点都是 enabled: false，不会自动发送任何目标点。
-# - 如果只想在 RViz 里手动点 2D Goal，可以保持本文件全禁用。
+# 流程：
+# role 简写：
+# - observe：导航到观察位，到点后启动 YOLO。
+# - pick_auto_place：导航到抓取位，机械臂 pick 后自动插入去对应 class 放置区的路线。
+# - pick：只抓取，不自动插入放置路线；后面可以手写 carry/place/return 点。
+# - carry：带箱普通途径点。
+# - place：机械臂 place；place.target=auto 时使用最近一次 YOLO class 对应放置区坐标。
+# - return：空载普通途径点。
+#
+# 例：如果想手写 PICK_01 后的途径点，把 PICK_01 的 role 改为 pick，然后追加：
+# - {name: CARRY_01_AISLE, role: carry, x: 3.20, y: 1.55, yaw_deg: 0.0}
+# - {name: PLACE_01_AUTO, role: place, x: 5.10, y: 0.00, yaw_deg: 0.0, target: auto}
 
 yolo:
-  settle_sec: 0.8
+  settle_sec: 1.0
   timeout_sec: 3.0
   min_score: 0.5
 
-# 不在这里预设放置目标点。后续如果要用自动取放流程，再按你的实测点位填写。
-place_targets: {}
+place_targets:
+  class_0:
+    x: 5.10
+    y: 1.20
+    yaw_deg: 0.0
+    aliases: ['class0', '0', 'food', '食品']
+  class_1:
+    x: 5.10
+    y: 0.40
+    yaw_deg: 0.0
+    aliases: ['class1', '1', 'tool', '工具']
+  class_2:
+    x: 5.10
+    y: -0.40
+    yaw_deg: 0.0
+    aliases: ['class2', '2', 'instrument', '仪器']
+  class_3:
+    x: 5.10
+    y: -1.20
+    yaw_deg: 0.0
+    aliases: ['class3', '3', 'medicine', '药品']
 
 waypoints:
-  # 起点只作坐标参考，不发送给 Nav2。
-  - {name: START_CENTER_REFERENCE, x: 0.09, y: 0.00, yaw_deg: 0.0, enabled: false, yolo: false, arm: none}
+  - {name: OBSERVE_01, role: observe, x: 1.275, y: 1.20, yaw_deg: 0.0}
+  - {name: PICK_01, role: pick_auto_place, x: 1.275, y: 1.45, yaw_deg: 0.0, transfer_x: 4.60, side_aisle_y: 1.55, return_to_next_pick: true}
 
-  # 预留给你自己填的目标点。
-  - {name: USER_GOAL_01, x: 1.25, y: 0.40, yaw_deg: 0.0, enabled: true, yolo: false, arm: none}
-  - {name: USER_GOAL_02, x: 1.50, y: 0.40, yaw_deg: 0.0, enabled: true, yolo: false, arm: pick}
-  - {name: USER_GOAL_03, x: 0.00, y: 0.00, yaw_deg: 0.0, enabled: false, yolo: false, arm: none}
-  - {name: USER_GOAL_04, x: 0.00, y: 0.00, yaw_deg: 0.0, enabled: false, yolo: false, arm: none}
-  - {name: USER_GOAL_05, x: 0.00, y: 0.00, yaw_deg: 0.0, enabled: false, yolo: false, arm: none}
+  # - {name: OBSERVE_02, role: observe, x: 1.20, y: 0.425, yaw_deg: 0.0}
+  # - {name: PICK_02, role: pick_auto_place, x: 1.45, y: 0.425, yaw_deg: 0.0, transfer_x: 4.60, side_aisle_y: 1.55, return_to_next_pick: true}
+
+  # - {name: OBSERVE_03, role: observe, x: 1.20, y: -0.425, yaw_deg: 0.0}
+  # - {name: PICK_03, role: pick_auto_place, x: 1.45, y: -0.425, yaw_deg: 0.0, transfer_x: 4.60, side_aisle_y: 1.55, return_to_next_pick: true}
+
+  # - {name: OBSERVE_04, role: observe, x: 1.20, y: -1.275, yaw_deg: 0.0}
+  # - {name: PICK_04, role: pick_auto_place, x: 1.45, y: -1.275, yaw_deg: 0.0, transfer_x: 4.60, side_aisle_y: 1.55, return_to_next_pick: true}
+
+  # - {name: OBSERVE_05, role: observe, x: 2.05, y: 1.275, yaw_deg: 0.0}
+  # - {name: PICK_05, role: pick_auto_place, x: 2.30, y: 1.275, yaw_deg: 0.0, transfer_x: 4.60, side_aisle_y: 1.55, return_to_next_pick: true}
+
+  # - {name: OBSERVE_06, role: observe, x: 2.05, y: 0.425, yaw_deg: 0.0}
+  # - {name: PICK_06, role: pick_auto_place, x: 2.30, y: 0.425, yaw_deg: 0.0, transfer_x: 4.60, side_aisle_y: 1.55, return_to_next_pick: true}
+
+  # - {name: OBSERVE_07, role: observe, x: 2.05, y: -0.425, yaw_deg: 0.0}
+  # - {name: PICK_07, role: pick_auto_place, x: 2.30, y: -0.425, yaw_deg: 0.0, transfer_x: 4.60, side_aisle_y: 1.55, return_to_next_pick: true}
+
+  # - {name: OBSERVE_08, role: observe, x: 2.05, y: -1.275, yaw_deg: 0.0}
+  # - {name: PICK_08, role: pick_auto_place, x: 2.30, y: -1.275, yaw_deg: 0.0, transfer_x: 4.60, side_aisle_y: 1.55, return_to_next_pick: false}
