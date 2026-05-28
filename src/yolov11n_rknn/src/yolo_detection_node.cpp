@@ -53,7 +53,7 @@ public:
         }
 
         // 设置默认模型路径（使用包内的models目录）
-        std::string default_model_path = package_share_dir + "/models/light-1.rknn";
+        std::string default_model_path = package_share_dir + "/models/dog.rknn";
 
         // 声明参数
         declare_parameter("model_path", default_model_path);
@@ -62,8 +62,10 @@ public:
         declare_parameter("show_detection", true);
         declare_parameter("publish_image", false);
         declare_parameter("camera_id", 0);
-        declare_parameter("num_classes", 1);
-        declare_parameter("class_names", std::vector<std::string>{"ball"});
+        declare_parameter("num_classes", 4);
+        declare_parameter("class_names", std::vector<std::string>{"class_0", "class_1", "class_2", "class_3"});
+        declare_parameter("input_width", 640);
+        declare_parameter("input_height", 480);
         declare_parameter("start_enabled", true);
         declare_parameter("enable_topic", std::string("/yolo/enable"));
 
@@ -145,9 +147,9 @@ private:
         detection_enabled_ = get_parameter("start_enabled").as_bool();
         enable_topic_ = get_parameter("enable_topic").as_string();
 
-        // 设置输入尺寸（固定为 640x640）
-        config.input_width = 640;
-        config.input_height = 640;
+        // 设置输入尺寸（从参数读取，默认 640x480）
+        config.input_width = get_parameter("input_width").as_int();
+        config.input_height = get_parameter("input_height").as_int();
 
         return config;
     }

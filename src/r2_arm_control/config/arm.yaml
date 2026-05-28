@@ -313,6 +313,8 @@ idle_kd_joint1: 2.0
 
 # 启动安全回空闲：上电后的第一次回 idle 使用更慢的速度，降低碰撞风险。
 auto_enter_idle_on_start: true
+# 启动回 idle 前必须等 /r2/arm/feedback_status 健康，避免控制器未起来时反复下发目标。
+startup_require_feedback_ok: true
 startup_idle_ee_linear_speed_limit: 0.04
 startup_idle_ee_linear_acc_limit: 0.08
 

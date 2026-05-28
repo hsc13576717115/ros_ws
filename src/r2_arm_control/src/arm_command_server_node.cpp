@@ -1056,14 +1056,20 @@ private:
     while (std::chrono::steady_clock::now() <= motion_end) {
       bool hard_timeout = false;
       bool stale_feedback = false;
+      bool feedback_status_unhealthy = false;
       {
         std::lock_guard<std::mutex> lock(mutex_);
         hard_timeout = hard_timeout_active_;
         stale_feedback = !measuredStateFreshLocked();
+        feedback_status_unhealthy = have_feedback_status_ && !feedback_ok_;
       }
 
       if (hard_timeout) {
         execution.message = "MIT native execution aborted because hardware entered hard-timeout safe hold.";
+        return execution;
+      }
+      if (feedback_status_unhealthy) {
+        execution.message = "MIT native execution aborted because motor feedback status became unhealthy.";
         return execution;
       }
       if (stale_feedback) {
@@ -1146,15 +1152,21 @@ private:
       MeasuredState measured_snapshot;
       bool hard_timeout = false;
       bool stale_feedback = false;
+      bool feedback_status_unhealthy = false;
       {
         std::lock_guard<std::mutex> lock(mutex_);
         measured_snapshot = measured_state_;
         hard_timeout = hard_timeout_active_;
         stale_feedback = !measuredStateFreshLocked();
+        feedback_status_unhealthy = have_feedback_status_ && !feedback_ok_;
       }
 
       if (hard_timeout) {
         execution.message = "MIT native execution entered hard-timeout safe hold during settle.";
+        return execution;
+      }
+      if (feedback_status_unhealthy) {
+        execution.message = "MIT native execution aborted because motor feedback status became unhealthy during settle.";
         return execution;
       }
 
@@ -1328,6 +1340,16 @@ private:
       if (!measuredStateFreshLocked()) {
         response->accepted = false;
         response->message = "Direct executor rejected the target because measured joint feedback is stale.";
+        publishStateLocked("ERROR", response->message, requested_x, requested_z, &joint_goal);
+        return;
+      }
+      if (have_feedback_status_ && !feedback_ok_) {
+        response->accepted = false;
+        std::ostringstream oss;
+        oss << "Direct executor rejected the target because motor feedback status is unhealthy"
+            << " (stale_motor_count=" << static_cast<int>(stale_motor_count_)
+            << ", startup_grace=" << (startup_grace_active_ ? "true" : "false") << ").";
+        response->message = oss.str();
         publishStateLocked("ERROR", response->message, requested_x, requested_z, &joint_goal);
         return;
       }

@@ -468,15 +468,27 @@ namespace lslidar_driver
 		serial_port_ = std::string("/dev/ttyUSB0");
 		this->declare_parameter<std::string>("serial_port_", "/dev/ttyUSB0");
 		this->get_parameter("serial_port_", serial_port_);
-		serial_ = LSIOSR::instance(serial_port_, baud_rate_);
-		code = serial_->init();
-		if (code != 0)
+
+		// Retry opening serial port up to 5 times with 1s delay.
+		// Radar may need time to boot after power-on.
+		for (int attempt = 1; attempt <= 5; ++attempt)
 		{
-			printf("open_port %s ERROR !\n", serial_port_.c_str());
-			rclcpp::shutdown();
-			exit(0);
+			serial_ = LSIOSR::instance(serial_port_, baud_rate_);
+			code = serial_->init();
+			if (code == 0)
+			{
+				RCLCPP_INFO(this->get_logger(), "open_port %s OK (attempt %d/5)!",
+				            serial_port_.c_str(), attempt);
+				return;
+			}
+			RCLCPP_WARN(this->get_logger(),
+			            "open_port %s ERROR (attempt %d/5), retrying in 1s...",
+			            serial_port_.c_str(), attempt);
+			rclcpp::sleep_for(std::chrono::seconds(1));
 		}
-		printf("open_port %s OK !\n", serial_port_.c_str());
+		RCLCPP_FATAL(this->get_logger(), "open_port %s FAILED after 5 attempts, giving up.",
+		             serial_port_.c_str());
+		rclcpp::shutdown();
 	}
 
 	bool LslidarDriver::createRosIO()

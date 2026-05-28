@@ -53,6 +53,13 @@ std::string resolveSocketCanInterfaceName(const std::string & configured_name)
   return configured_name;
 }
 
+std::string formatCanId(MotorId id)
+{
+  std::ostringstream oss;
+  oss << "0x" << std::hex << id;
+  return oss.str();
+}
+
 }  // namespace
 
 Limit_param limit_param[Num_Of_Motor] = {
@@ -184,6 +191,16 @@ Motor_Control::Motor_Control(
       {
         throw std::runtime_error(
                 "Failed to configure CAN socket: " + std::string(std::strerror(errno)));
+      }
+
+      const int send_buffer_bytes = 1 << 20;
+      if (
+        ::setsockopt(
+          socket_fd_, SOL_SOCKET, SO_SNDBUF, &send_buffer_bytes,
+          sizeof(send_buffer_bytes)) < 0)
+      {
+        std::cerr << "Failed to enlarge CAN send buffer on " << socketcan_interface_name_
+                  << ": " << std::strerror(errno) << std::endl;
       }
 
       struct sockaddr_can addr {};
@@ -831,20 +848,48 @@ void Motor_Control::WriteData(const can_send_frame & frame)
     std::copy(frame.data, frame.data + raw_frame.len, raw_frame.data);
 
     std::lock_guard<std::mutex> lock(serial_mutex_);
-    const auto written = ::write(socket_fd_, &raw_frame, sizeof(raw_frame));
-    if (written != static_cast<ssize_t>(sizeof(raw_frame))) {
-      if (written < 0 && (errno == EAGAIN || errno == ENOBUFS)) {
-        log_write_error(
-          "SocketCAN write would block on '" + socketcan_interface_name_ +
-          "'; dropping frame for id=0x" + std::to_string(frame.canId));
-      } else {
-        const std::string error_message = written < 0
-          ? std::strerror(errno)
-          : "short write";
-        log_write_error(
-          "SocketCAN write failed on '" + socketcan_interface_name_ + "': " + error_message);
+    constexpr int kMaxWriteAttempts = 4;
+    constexpr int kPollTimeoutMs = 5;
+    std::string last_error = "unknown error";
+    for (int attempt = 0; attempt < kMaxWriteAttempts; ++attempt) {
+      const auto written = ::write(socket_fd_, &raw_frame, sizeof(raw_frame));
+      if (written == static_cast<ssize_t>(sizeof(raw_frame))) {
+        return;
       }
+
+      if (written < 0 && errno == EINTR) {
+        last_error = "interrupted";
+        continue;
+      }
+
+      if (written < 0 && (errno == EAGAIN || errno == ENOBUFS)) {
+        last_error = std::strerror(errno);
+        struct pollfd poll_fd {};
+        poll_fd.fd = socket_fd_;
+        poll_fd.events = POLLOUT;
+        const int ready = ::poll(&poll_fd, 1, kPollTimeoutMs);
+        if (ready > 0) {
+          continue;
+        }
+        if (ready == 0) {
+          last_error = "timed out waiting for CAN TX space";
+          continue;
+        }
+        if (errno == EINTR) {
+          last_error = "interrupted while waiting for CAN TX space";
+          continue;
+        }
+        last_error = std::strerror(errno);
+        break;
+      }
+
+      last_error = written < 0 ? std::strerror(errno) : "short write";
+      break;
     }
+    log_write_error(
+      "SocketCAN write failed on '" + socketcan_interface_name_ +
+      "' after retries; dropping frame for id=" + formatCanId(frame.canId) +
+      ": " + last_error);
     return;
   }
 

@@ -23,16 +23,16 @@ controller_server:
     FollowPath:
       plugin: "nav2_rotation_shim_controller::RotationShimController"  # 外层旋转shim：到目标区后锁定原地旋转，不退回路径跟踪
       primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"  # 主路径跟踪器
-      angular_dist_threshold: 0.52         # 更早先转向再走，减少四足边走边拧导致的切角
-      angular_disengage_threshold: 0.12    # 退出shim时仍保留一定对齐余量，减少反复切换
+      angular_dist_threshold: 3.14         # 彻底禁用 RotationShim 原地旋转，四足原地转易漂移导致停不下来
+      angular_disengage_threshold: 0.35    # 退出阈值保留，实际已不会触发
       rotate_to_heading_angular_vel: 0.24  # 与 velocity_smoother / bridge 对齐，避免上游饱和
       max_angular_accel: 0.35              # 角加速度(rad/s^2)，降低原地修朝向时的过冲
       forward_sampling_distance: 0.30      # 沿路径向前采样距离，用于估算路径方向；不影响 rotate_to_goal_heading
       simulate_ahead_time: 0.6             # 缩短旋转碰撞前瞻时间，避免过度保守
-      rotate_to_goal_heading: false        # 禁用 RotationShim 最终朝向对齐，由 cmd_vel_to_move_cmd 的 final_align 独占控制，避免两者打架
+      rotate_to_goal_heading: false        # 关闭 RotationShim 终点原地朝向对齐，改由 bridge final_align 比例控制
       closed_loop: true                    # 用里程计角速度闭环约束旋转过程
 
-      desired_linear_vel: 0.20             # 室内平地低速巡航，优先跟踪精度
+      desired_linear_vel: 0.14             # 与 velocity_smoother / 四足步态可执行速度对齐，稳妥完赛优先
       lookahead_dist: 0.45                 # 减小前瞻，提升小空间路径贴合度
       min_lookahead_dist: 0.22             # 最小前瞻距离(m)
       max_lookahead_dist: 0.60             # 最大前瞻距离(m)
@@ -45,9 +45,9 @@ controller_server:
       regulated_linear_scaling_min_radius: 0.90
       regulated_linear_scaling_min_speed: 0.05
       use_cost_regulated_linear_velocity_scaling: true  # 障碍附近自动降速
-      cost_scaling_dist: 0.50              # 更早在贴边场景下减速
+      cost_scaling_dist: 0.65              # 更早在贴边场景下减速，给 0.5kg 搬运留余量
       cost_scaling_gain: 0.60              # 提高贴障减速强度，改善停车精度
-      inflation_cost_scaling_factor: 2.5   # 与膨胀层匹配的代价缩放系数 - 降低梯度陡度
+      inflation_cost_scaling_factor: 2.2   # 与膨胀层匹配的代价缩放系数，保留更宽安全梯度
       use_rotate_to_heading: false         # 关闭RPP内置转向，避免与RotationShim重复导致频繁停转
       rotate_to_heading_min_angle: 0.35    # 兼容保留（RPP关闭转向时该项基本不生效）
       allow_reversing: false               # 四足保持不倒车
@@ -106,15 +106,13 @@ behavior_server:
     costmap_topic: local_costmap/costmap_raw         # 行为模块订阅的局部代价地图
     footprint_topic: local_costmap/published_footprint  # 机器人足迹话题
     cycle_frequency: 10.0                             # 恢复行为循环频率(Hz)
-    behavior_plugins: ["spin", "backup", "wait"]      # 启用的恢复行为
+    behavior_plugins: ["spin", "wait"]                # 禁用自动后退；Spin 仅供受控同点转向航点调用
     global_frame: odom                                # 恢复行为参考坐标系
     robot_base_frame: base_link                       # 机器人基座坐标系
     use_sim_time: false                               # 是否使用仿真时间
 
     spin:
       plugin: "nav2_behaviors/Spin"                   # 原地旋转行为
-    backup:
-      plugin: "nav2_behaviors/BackUp"                 # 后退脱困行为
     wait:
       plugin: "nav2_behaviors/Wait"                   # 等待行为
 
@@ -159,8 +157,10 @@ bt_navigator:
     - nav2_is_path_valid_condition_bt_node
     - nav2_navigate_through_poses_action_bt_node
     - nav2_remove_passed_goals_action_bt_node
-    default_nav_to_pose_bt_node_xml: "navigate_to_pose_w_path_invalid_replanning_and_recovery.xml" # 单目标导航默认行为树
-    default_nav_through_poses_bt_node_xml: "navigate_to_pose_w_replanning_and_recovery.xml" # 多目标导航默认行为树
+    default_nav_to_pose_bt_xml: "navigate_to_pose_w_path_invalid_replanning_and_recovery.xml" # Humble 单目标导航默认行为树
+    default_nav_through_poses_bt_xml: "navigate_through_poses_w_replanning_and_recovery.xml" # Humble 多目标导航默认行为树
+    default_nav_to_pose_bt_node_xml: "navigate_to_pose_w_path_invalid_replanning_and_recovery.xml" # 兼容旧键名
+    default_nav_through_poses_bt_node_xml: "navigate_through_poses_w_replanning_and_recovery.xml" # 兼容旧键名
 
 bt_navigator_rclcpp_node:
   ros__parameters:
@@ -179,12 +179,13 @@ local_costmap:
       height: 3                             # 局部地图高度(m)
       resolution: 0.05                      # 地图分辨率(m/格)
       footprint: "[[0.400, 0.227], [0.400, -0.227], [-0.400, -0.227], [-0.400, 0.227]]"  # 机体 800mm x 454mm，base_link 位于机体中心
+      footprint_padding: 0.03               # 任务赛带箱/摆腿留 3cm 安全边界
       plugins: ["voxel_layer", "inflation_layer"]   # 局部地图启用插件
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"   # 障碍膨胀层
-        cost_scaling_factor: 2.5                    # 膨胀代价衰减系数 - 降低梯度陡度
-        inflation_radius: 0.30                     # 膨胀半径(m)，必须 >= footprint 内切半径 0.237m
+        cost_scaling_factor: 2.2                    # 膨胀代价衰减系数，保留更宽安全梯度
+        inflation_radius: 0.30                     # 缩小膨胀半径，仍高于 footprint 内切半径 0.237m
 
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"       # 三维体素障碍层（用激光更新）
@@ -219,6 +220,7 @@ global_costmap:
       robot_base_frame: base_link                   # 机器人基座坐标系
       use_sim_time: false                           # 是否使用仿真时间
       footprint: "[[0.400, 0.227], [0.400, -0.227], [-0.400, -0.227], [-0.400, 0.227]]"  # 机体 800mm x 454mm，base_link 位于机体中心
+      footprint_padding: 0.03                       # 与局部地图一致，规划目标不贴箱/墙
       resolution: 0.05                              # 地图分辨率(m/格)
       track_unknown_space: false                    # 未知区域按可通行处理，避免 SLAM 初期绕未知区
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]  # 全局地图插件
@@ -245,8 +247,8 @@ global_costmap:
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"   # 膨胀层
-        cost_scaling_factor: 2.5                    # 膨胀代价衰减系数 - 降低梯度陡度
-        inflation_radius: 0.30                     # 膨胀半径(m)，必须 >= footprint 内切半径 0.237m
+        cost_scaling_factor: 2.2                    # 膨胀代价衰减系数，保留更宽安全梯度
+        inflation_radius: 0.30                     # 缩小膨胀半径，仍高于 footprint 内切半径 0.237m
 
       always_send_full_costmap: False               # 改为增量更新，降低 RViz 和 DDS 负载
 

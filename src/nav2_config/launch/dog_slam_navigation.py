@@ -115,6 +115,11 @@ def generate_launch_description():
         default_value='0.0',
         description='Static TF yaw from base_link_raw to laser (degrees)'
     )
+    self_filter_laser_yaw_arg = DeclareLaunchArgument(
+        'self_filter_laser_yaw_deg',
+        default_value='180.0',
+        description='LiDAR polar angle yaw used only by the lslidar self-filter (degrees)'
+    )
     laser_x_arg = DeclareLaunchArgument(
         'laser_x',
         default_value='-0.12102',
@@ -138,7 +143,7 @@ def generate_launch_description():
 
     start_preset_mission_arg = DeclareLaunchArgument(
         'start_preset_mission',
-        default_value='false',
+        default_value='true',
         description='Start preset multi-waypoint mission node'
     )
 
@@ -229,6 +234,7 @@ def generate_launch_description():
                 'imu_pitch_deg': LaunchConfiguration('imu_pitch_deg'),
                 'imu_yaw_deg': LaunchConfiguration('imu_yaw_deg'),
                 'laser_yaw_deg': LaunchConfiguration('laser_yaw_deg'),
+                'self_filter_laser_yaw_deg': LaunchConfiguration('self_filter_laser_yaw_deg'),
                 'laser_x': LaunchConfiguration('laser_x'),
                 'laser_y': LaunchConfiguration('laser_y'),
                 'laser_z': LaunchConfiguration('laser_z'),
@@ -263,6 +269,7 @@ def generate_launch_description():
         imu_pitch_arg,
         imu_yaw_arg,
         laser_yaw_arg,
+        self_filter_laser_yaw_arg,
         laser_x_arg,
         laser_y_arg,
         laser_z_arg,
@@ -298,6 +305,7 @@ def generate_launch_description():
                 'imu_pitch_deg': LaunchConfiguration('imu_pitch_deg'),
                 'imu_yaw_deg': LaunchConfiguration('imu_yaw_deg'),
                 'laser_yaw_deg': LaunchConfiguration('laser_yaw_deg'),
+                'self_filter_laser_yaw_deg': LaunchConfiguration('self_filter_laser_yaw_deg'),
                 'laser_x': LaunchConfiguration('laser_x'),
                 'laser_y': LaunchConfiguration('laser_y'),
                 'laser_z': LaunchConfiguration('laser_z'),

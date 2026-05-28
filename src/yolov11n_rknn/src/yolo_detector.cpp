@@ -252,10 +252,9 @@ std::vector<DetectBox> YoloDetector::postprocess(const std::vector<rknn_output>&
 
     // 遍历每个检测头
     for (int head_idx = 0; head_idx < ModelOutputConfig::NUM_HEADS; ++head_idx) {
-        const auto& map_size = ModelOutputConfig::MAP_SIZES[head_idx];
-        int map_h = map_size[0];
-        int map_w = map_size[1];
         int stride = ModelOutputConfig::STRIDES[head_idx];
+        int map_h = config_.input_height / stride;
+        int map_w = config_.input_width / stride;
 
         const std::vector<float>& reg = output_tensors[head_idx * 2];
         const std::vector<float>& cls = output_tensors[head_idx * 2 + 1];

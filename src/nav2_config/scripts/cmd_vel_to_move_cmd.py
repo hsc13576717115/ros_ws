@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import math
 from typing import Optional, Tuple
 
@@ -9,6 +10,7 @@ from nav_msgs.msg import Path
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.time import Time
+from std_msgs.msg import String
 from tf2_ros import Buffer, TransformException, TransformListener
 from vmc_quadruped_controller.msg import MoveCmd
 
@@ -52,6 +54,7 @@ class CmdVelToMoveCmd(Node):
         self.declare_parameter('preset_goal_pose_topic', '/preset_current_goal')
         self.declare_parameter('plan_topic', '/plan')
         self.declare_parameter('global_plan_topic', '/global_plan')
+        self.declare_parameter('status_topic', '/cmd_vel_to_move_cmd/status')
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('final_align_enabled', True)
         self.declare_parameter('final_align_xy_trigger', 0.08)
@@ -96,6 +99,7 @@ class CmdVelToMoveCmd(Node):
         ).value
         self._plan_topic = self.get_parameter('plan_topic').value
         self._global_plan_topic = self.get_parameter('global_plan_topic').value
+        self._status_topic = self.get_parameter('status_topic').value
         self._base_frame = self.get_parameter('base_frame').value
         self._final_align_enabled = bool(
             self.get_parameter('final_align_enabled').value
@@ -133,11 +137,26 @@ class CmdVelToMoveCmd(Node):
         self._goal_pose_rx_time: float = 0.0
         self._plan_goal_pose: Optional[PoseStamped] = None
         self._plan_goal_pose_rx_time: float = 0.0
+        self._last_status_pub_sec = 0.0
+        self._last_status = {
+            'final_align_active': False,
+            'goal_available': False,
+            'goal_frame': '',
+            'distance_m': None,
+            'yaw_error_rad': None,
+            'yaw_error_deg': None,
+            'linear_x_cmd': 0.0,
+            'angular_z_cmd': 0.0,
+            'step_x': 0.0,
+            'step_y': 0.0,
+            'reason': 'startup',
+        }
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=True)
 
         self._publisher = self.create_publisher(MoveCmd, self._move_cmd_topic, 20)
+        self._status_pub = self.create_publisher(String, self._status_topic, 10)
         self._subscriber = self.create_subscription(
             Twist, self._cmd_vel_topic, self._cmd_vel_callback, 20
         )
@@ -197,16 +216,73 @@ class CmdVelToMoveCmd(Node):
             return self._goal_pose
         return self._plan_goal_pose
 
+    def _set_align_status(
+        self,
+        *,
+        final_align_active: bool,
+        reason: str,
+        linear_x_cmd: float,
+        angular_z_cmd: float,
+        goal_pose: Optional[PoseStamped] = None,
+        distance_m: Optional[float] = None,
+        yaw_error_rad: Optional[float] = None,
+    ) -> None:
+        self._last_status.update(
+            {
+                'final_align_active': bool(final_align_active),
+                'goal_available': goal_pose is not None,
+                'goal_frame': goal_pose.header.frame_id if goal_pose is not None else '',
+                'distance_m': None if distance_m is None else round(distance_m, 4),
+                'yaw_error_rad': None if yaw_error_rad is None else round(yaw_error_rad, 4),
+                'yaw_error_deg': None
+                if yaw_error_rad is None
+                else round(math.degrees(yaw_error_rad), 2),
+                'linear_x_cmd': round(linear_x_cmd, 4),
+                'angular_z_cmd': round(angular_z_cmd, 4),
+                'reason': reason,
+            }
+        )
+
+    def _publish_status(
+        self,
+        step_x: float,
+        step_y: float,
+        *,
+        force: bool = False,
+    ) -> None:
+        now = self.get_clock().now().nanoseconds / 1e9
+        if not force and (now - self._last_status_pub_sec) < 0.20:
+            return
+        self._last_status_pub_sec = now
+        self._last_status['step_x'] = round(step_x, 4)
+        self._last_status['step_y'] = round(step_y, 4)
+        msg = String()
+        msg.data = json.dumps(self._last_status, ensure_ascii=False)
+        self._status_pub.publish(msg)
+
     def _maybe_apply_final_alignment(
         self, linear_x: float, angular_z: float
     ) -> Tuple[float, float]:
         if not self._final_align_enabled:
             self._final_align_active = False
+            self._set_align_status(
+                final_align_active=False,
+                reason='disabled',
+                linear_x_cmd=linear_x,
+                angular_z_cmd=angular_z,
+            )
             return linear_x, angular_z
 
         goal_pose = self._get_active_goal_pose()
         if goal_pose is None or not goal_pose.header.frame_id:
             self._final_align_active = False
+            self._set_align_status(
+                final_align_active=False,
+                reason='no_goal',
+                linear_x_cmd=linear_x,
+                angular_z_cmd=angular_z,
+                goal_pose=goal_pose,
+            )
             return linear_x, angular_z
 
         try:
@@ -218,6 +294,13 @@ class CmdVelToMoveCmd(Node):
             )
         except TransformException:
             self._final_align_active = False
+            self._set_align_status(
+                final_align_active=False,
+                reason='tf_unavailable',
+                linear_x_cmd=linear_x,
+                angular_z_cmd=angular_z,
+                goal_pose=goal_pose,
+            )
             return linear_x, angular_z
 
         robot_x = transform.transform.translation.x
@@ -233,25 +316,48 @@ class CmdVelToMoveCmd(Node):
         yaw_error = normalize_angle(goal_yaw - robot_yaw)
 
         if self._final_align_active:
-            final_align = (
-                dist <= (self._final_align_xy_trigger + 0.03)
-                and abs(yaw_error) >= self._final_align_yaw_exit
-            )
+            # 已经进入 final_align：只检查角度，不管位置偏移。
+            final_align = abs(yaw_error) >= self._final_align_yaw_exit
         else:
-            final_align = (
-                dist <= self._final_align_xy_trigger
-                and abs(yaw_error) >= self._final_align_yaw_trigger
-            )
+            # 第一次进入：只要距离到位就触发 final_align，不管角度多大。
+            # 避免 Nav2 RPP 在终点附近因朝向不对而绕圈。
+            final_align = dist <= self._final_align_xy_trigger
 
         if not final_align:
             self._final_align_active = False
+            self._set_align_status(
+                final_align_active=False,
+                reason='tracking_path',
+                linear_x_cmd=linear_x,
+                angular_z_cmd=angular_z,
+                goal_pose=goal_pose,
+                distance_m=dist,
+                yaw_error_rad=yaw_error,
+            )
             return linear_x, angular_z
 
-        linear_mag = min(
-            abs(linear_x) * self._final_align_linear_scale,
-            self._final_align_max_linear_x,
+        # 纯原地旋转，线速度强制为 0
+        linear_x = 0.0
+
+        # 超调保护：如果误差已经小于 min_step 能分辨的精度，直接停止。
+        # 避免 "最小步长大于 exit 阈值" 导致的永久震荡。
+        min_effective_yaw = max(
+            self._final_align_yaw_exit,
+            self._min_nonzero_angular_z / max(self._final_align_angular_kp, 0.1),
         )
-        linear_x = math.copysign(linear_mag, linear_x) if linear_mag > 0.0 else 0.0
+        if abs(yaw_error) <= min_effective_yaw:
+            self._final_align_active = False
+            self._set_align_status(
+                final_align_active=False,
+                reason='aligned_within_effective_deadband',
+                linear_x_cmd=linear_x,
+                angular_z_cmd=0.0,
+                goal_pose=goal_pose,
+                distance_m=dist,
+                yaw_error_rad=yaw_error,
+            )
+            return linear_x, 0.0
+
         min_turn = max(self._min_nonzero_angular_z, self._deadzone)
         angular_mag = clamp(
             abs(self._final_align_angular_kp * yaw_error),
@@ -265,6 +371,15 @@ class CmdVelToMoveCmd(Node):
                 f'Final alignment assist active: dist={dist:.3f} m, yaw_error={yaw_error:.3f} rad'
             )
         self._final_align_active = True
+        self._set_align_status(
+            final_align_active=True,
+            reason='final_align',
+            linear_x_cmd=linear_x,
+            angular_z_cmd=angular_z,
+            goal_pose=goal_pose,
+            distance_m=dist,
+            yaw_error_rad=yaw_error,
+        )
         return linear_x, angular_z
 
     def _publish_stop(self) -> None:
@@ -275,6 +390,13 @@ class CmdVelToMoveCmd(Node):
         out.step_x = 0.0
         out.step_y = 0.0
         self._publisher.publish(out)
+        self._set_align_status(
+            final_align_active=False,
+            reason='stop',
+            linear_x_cmd=0.0,
+            angular_z_cmd=0.0,
+        )
+        self._publish_status(0.0, 0.0, force=True)
 
     def _watchdog_callback(self) -> None:
         if self._last_cmd_vel_rx_time is None:
@@ -391,6 +513,7 @@ class CmdVelToMoveCmd(Node):
         out.step_x = float(step_x)
         out.step_y = float(step_y)
         self._publisher.publish(out)
+        self._publish_status(step_x, step_y)
 
 
 def main(args=None) -> None:

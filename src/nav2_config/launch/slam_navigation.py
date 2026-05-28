@@ -12,7 +12,7 @@ SLAM + Navigation 同时运行
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
@@ -51,7 +51,7 @@ def generate_launch_description():
 
     cmd_invert_angular_z_arg = DeclareLaunchArgument(
         'cmd_invert_angular_z',
-        default_value='true',
+        default_value='false',
         description='Invert /cmd_vel angular.z before mapping to /move_cmd step_x'
     )
 
@@ -77,6 +77,11 @@ def generate_launch_description():
         'laser_yaw_deg',
         default_value='0.0',
         description='Static TF yaw from base_link_raw to laser (degrees)'
+    )
+    self_filter_laser_yaw_arg = DeclareLaunchArgument(
+        'self_filter_laser_yaw_deg',
+        default_value='180.0',
+        description='LiDAR polar angle yaw used only by the lslidar self-filter (degrees)'
     )
     laser_x_arg = DeclareLaunchArgument(
         'laser_x',
@@ -166,6 +171,11 @@ def generate_launch_description():
         'behavior_trees',
         'navigate_to_pose_w_path_invalid_replanning_and_recovery.xml'
     )
+    nav_through_poses_bt_xml = os.path.join(
+        nav2_config_dir,
+        'behavior_trees',
+        'navigate_through_poses_w_replanning_and_recovery.xml'
+    )
 
     # ============================================================================
     # 1. 静态 TF
@@ -230,7 +240,7 @@ def generate_launch_description():
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
                 'self_filter_laser_x': LaunchConfiguration('laser_x'),
                 'self_filter_laser_y': LaunchConfiguration('laser_y'),
-                'self_filter_laser_yaw_deg': LaunchConfiguration('laser_yaw_deg'),
+                'self_filter_laser_yaw_deg': LaunchConfiguration('self_filter_laser_yaw_deg'),
             }
         ],
     )
@@ -377,7 +387,10 @@ def generate_launch_description():
         parameters=[
             params_file,
             {'use_sim_time': LaunchConfiguration('use_sim_time')},
-            {'default_nav_to_pose_bt_node_xml': nav_to_pose_bt_xml}
+            {'default_nav_to_pose_bt_xml': nav_to_pose_bt_xml},
+            {'default_nav_through_poses_bt_xml': nav_through_poses_bt_xml},
+            {'default_nav_to_pose_bt_node_xml': nav_to_pose_bt_xml},
+            {'default_nav_through_poses_bt_node_xml': nav_through_poses_bt_xml}
         ],
         remappings=[
             ('odom', '/odom'),  # 使用 Cartographer 发布的 odom
@@ -433,14 +446,15 @@ def generate_launch_description():
             {'preset_goal_pose_topic': '/preset_current_goal'},
             {'plan_topic': '/plan'},
             {'global_plan_topic': '/global_plan'},
+            {'status_topic': '/cmd_vel_to_move_cmd/status'},
             {'base_frame': 'base_link'},
-            {'final_align_enabled': True},
+            {'final_align_enabled': True},   # 启用 bridge final_align 比例控制终点朝向对齐
             {'final_align_xy_trigger': 0.08},
             {'final_align_yaw_trigger': 0.35},                  # 更早进入 final_align，给更多调整时间
             {'final_align_yaw_exit': 0.04},                     # 约 2.3° 才退出，提高最终朝向精度
             {'final_align_linear_scale': 0.15},
             {'final_align_max_linear_x': 0.0},                  # 完全原地旋转，不再前进
-            {'final_align_angular_kp': 1.5},                    # 略增大，加快收敛同时保留比例调节区间
+            {'final_align_angular_kp': 0.8},                    # 降低比例增益，减少高速旋转过冲
             {'min_nonzero_angular_z': 0.08},                    # 增大最小角速度，确保步态能有效响应不原地踏步
             {'min_nonzero_angular_linear_x_threshold': 0.02},   # 更早允许纯转向阶段触发最小角速度
             {'max_angular_z': 0.24},        # 与 velocity_smoother 对齐
@@ -499,6 +513,7 @@ def generate_launch_description():
         imu_pitch_arg,
         imu_yaw_arg,
         laser_yaw_arg,
+        self_filter_laser_yaw_arg,
         laser_x_arg,
         laser_y_arg,
         laser_z_arg,
@@ -517,8 +532,13 @@ def generate_launch_description():
         lidar_driver,
         yesense_launch,
         yolo_launch,
-        cartographer_node,
-        occupancy_grid_node,
+        TimerAction(
+            period=1.5,
+            actions=[
+                cartographer_node,
+                occupancy_grid_node,
+            ],
+        ),
         controller_server,
         planner_server,
         behavior_server,

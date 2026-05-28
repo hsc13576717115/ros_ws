@@ -33,20 +33,32 @@ def generate_launch_description():
     # 模型相关
     model_path_arg = DeclareLaunchArgument(
         'model_path',
-        default_value=PathJoinSubstitution([pkg_share_dir, 'models', 'light.rknn']),
+        default_value=PathJoinSubstitution([pkg_share_dir, 'models', 'dog.rknn']),
         description='Path to RKNN model file (relative to package share directory)'
     )
 
     num_classes_arg = DeclareLaunchArgument(
         'num_classes',
-        default_value='1',
+        default_value='4',
         description='Number of object classes in the model'
     )
 
     class_names_arg = DeclareLaunchArgument(
         'class_names',
-        default_value="['ball']",
+        default_value="['class_0', 'class_1', 'class_2', 'class_3']",
         description='List of class names'
+    )
+
+    input_width_arg = DeclareLaunchArgument(
+        'input_width',
+        default_value='640',
+        description='Model input width'
+    )
+
+    input_height_arg = DeclareLaunchArgument(
+        'input_height',
+        default_value='480',
+        description='Model input height'
     )
 
     # 检测参数
@@ -106,6 +118,8 @@ def generate_launch_description():
             'model_path': LaunchConfiguration('model_path'),
             'num_classes': LaunchConfiguration('num_classes'),
             'class_names': LaunchConfiguration('class_names'),
+            'input_width': LaunchConfiguration('input_width'),
+            'input_height': LaunchConfiguration('input_height'),
             'conf_threshold': LaunchConfiguration('conf_threshold'),
             'nms_threshold': LaunchConfiguration('nms_threshold'),
             'show_detection': LaunchConfiguration('show_detection'),
@@ -124,6 +138,8 @@ def generate_launch_description():
         model_path_arg,
         num_classes_arg,
         class_names_arg,
+        input_width_arg,
+        input_height_arg,
         conf_threshold_arg,
         nms_threshold_arg,
         show_detection_arg,

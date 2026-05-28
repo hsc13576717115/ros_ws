@@ -13,7 +13,7 @@ from rcl_interfaces.srv import SetParameters
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from sensor_msgs.msg import Joy
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, String, UInt8MultiArray
 
 from r2_arm_control.srv import MoveToXZ, SetArmState
 
@@ -48,6 +48,7 @@ class ArmStateMachineNode(Node):
         )
         self.declare_parameter("gpio_state_topic", "/r2/manual/dpad_down_gpio36_state")
         self.declare_parameter("state_name_topic", "/r2/arm/state_machine_state")
+        self.declare_parameter("feedback_status_topic", "/r2/arm/feedback_status")
         self.declare_parameter("set_state_service_name", "/r2/arm/set_state")
         self.declare_parameter("gpio_number", 36)
         self.declare_parameter("trigger_axis", 7)
@@ -55,6 +56,7 @@ class ArmStateMachineNode(Node):
         self.declare_parameter("active_high", True)
         self.declare_parameter("set_low_on_shutdown", True)
         self.declare_parameter("auto_enter_idle_on_start", True)
+        self.declare_parameter("startup_require_feedback_ok", True)
         self.declare_parameter("export_path", "/sys/class/gpio/export")
         self.declare_parameter("gpio_root", "/sys/class/gpio")
 
@@ -105,6 +107,7 @@ class ArmStateMachineNode(Node):
         )
         self.gpio_state_topic = str(self.get_parameter("gpio_state_topic").value)
         self.state_name_topic = str(self.get_parameter("state_name_topic").value)
+        self.feedback_status_topic = str(self.get_parameter("feedback_status_topic").value)
         self.set_state_service_name = str(
             self.get_parameter("set_state_service_name").value
         )
@@ -115,6 +118,9 @@ class ArmStateMachineNode(Node):
         self.set_low_on_shutdown = bool(self.get_parameter("set_low_on_shutdown").value)
         self.auto_enter_idle_on_start = bool(
             self.get_parameter("auto_enter_idle_on_start").value
+        )
+        self.startup_require_feedback_ok = bool(
+            self.get_parameter("startup_require_feedback_ok").value
         )
         self.export_path = Path(str(self.get_parameter("export_path").value))
         self.gpio_root = Path(str(self.get_parameter("gpio_root").value))
@@ -159,6 +165,12 @@ class ArmStateMachineNode(Node):
         self.state_pub = self.create_publisher(Bool, self.gpio_state_topic, 10)
         self.state_name_pub = self.create_publisher(String, self.state_name_topic, 10)
         self.create_subscription(Joy, self.joy_topic, self.joy_callback, 10)
+        self.create_subscription(
+            UInt8MultiArray,
+            self.feedback_status_topic,
+            self.feedback_status_callback,
+            10,
+        )
 
         self.move_client = self.create_client(MoveToXZ, self.move_service_name)
         self.param_client = self.create_client(SetParameters, self.arm_set_parameters_service)
@@ -176,7 +188,13 @@ class ArmStateMachineNode(Node):
         self.pending_advance_requested = False
         self.transition_lock = threading.Lock()
         self.last_wait_log_time = 0.0
+        self.last_feedback_wait_log_time = 0.0
         self.last_move_error = ""
+        self.feedback_status_received = False
+        self.feedback_ok = False
+        self.stale_motor_count = 0
+        self.hard_timeout_active = False
+        self.startup_grace_active = False
 
         self.auto_chain_pending = False
         self.auto_chain_target = ""
@@ -197,6 +215,7 @@ class ArmStateMachineNode(Node):
             "Arm state machine ready. sequence=idle->pick->store->place->idle, "
             f"transition_via=({self.transition_via_x:.3f}, {self.transition_via_z:.3f}), "
             f"auto_enter_idle_on_start={self.auto_enter_idle_on_start}, "
+            f"startup_require_feedback_ok={self.startup_require_feedback_ok}, "
             f"auto_chain_states={self.auto_chain_states}, "
             f"auto_chain_delay_sec={self.auto_chain_delay_sec:.1f}"
         )
@@ -264,7 +283,43 @@ class ArmStateMachineNode(Node):
             or self.auto_chain_pending
         ):
             return
+        if not self.startup_feedback_ready():
+            self.log_startup_feedback_wait()
+            return
         self.start_transition("idle", is_startup=True)
+
+    def feedback_status_callback(self, msg: UInt8MultiArray) -> None:
+        self.feedback_status_received = True
+        self.feedback_ok = len(msg.data) > 0 and msg.data[0] != 0
+        self.stale_motor_count = int(msg.data[1]) if len(msg.data) > 1 else 0
+        self.hard_timeout_active = len(msg.data) > 2 and msg.data[2] != 0
+        self.startup_grace_active = len(msg.data) > 3 and msg.data[3] != 0
+
+    def startup_feedback_ready(self) -> bool:
+        if not self.startup_require_feedback_ok:
+            return True
+        return (
+            self.feedback_status_received
+            and self.feedback_ok
+            and self.stale_motor_count == 0
+            and not self.hard_timeout_active
+        )
+
+    def log_startup_feedback_wait(self) -> None:
+        now_sec = time.monotonic()
+        if now_sec - self.last_feedback_wait_log_time < 2.0:
+            return
+        if not self.feedback_status_received:
+            detail = f"waiting for {self.feedback_status_topic}"
+        else:
+            detail = (
+                f"feedback_ok={self.feedback_ok}, stale_motor_count={self.stale_motor_count}, "
+                f"hard_timeout={self.hard_timeout_active}, startup_grace={self.startup_grace_active}"
+            )
+        self.get_logger().warn(
+            "Startup idle move is waiting for healthy arm feedback: " + detail
+        )
+        self.last_feedback_wait_log_time = now_sec
 
     def start_transition(self, target_state: str, is_startup: bool = False) -> None:
         worker = threading.Thread(
@@ -340,7 +395,10 @@ class ArmStateMachineNode(Node):
             action = self.gpio_actions[target_state]
             transition_config = self.transition_config(target_state, is_startup)
 
-            if not self.services_ready():
+            if is_startup and not self.startup_feedback_ready():
+                message = "Arm feedback is not healthy enough for startup idle move."
+                self.get_logger().warn(message)
+            elif not self.services_ready():
                 now_sec = time.monotonic()
                 if now_sec - self.last_wait_log_time >= 2.0:
                     move_ready = self.move_client.wait_for_service(timeout_sec=0.1)
