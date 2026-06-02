@@ -10,7 +10,7 @@ from nav_msgs.msg import Path
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.time import Time
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 from vmc_quadruped_controller.msg import MoveCmd
 
@@ -39,9 +39,10 @@ class CmdVelToMoveCmd(Node):
         self.declare_parameter('angular_z_scale', 0.45)
         self.declare_parameter('invert_linear_x', True)
         self.declare_parameter('invert_angular_z', True)
-        self.declare_parameter('max_angular_z', 0.18)
-        self.declare_parameter('max_angular_z_accel', 0.25)
-        self.declare_parameter('min_nonzero_angular_z', 0.03)
+        self.declare_parameter('max_angular_z', 0.14)
+        self.declare_parameter('max_angular_z_accel', 0.20)
+        self.declare_parameter('min_nonzero_linear_x', 0.06)
+        self.declare_parameter('min_nonzero_angular_z', 0.04)
         self.declare_parameter('min_nonzero_angular_linear_x_threshold', 0.03)
         self.declare_parameter('max_step_x', 1.0)
         self.declare_parameter('max_step_y', 1.0)
@@ -54,9 +55,11 @@ class CmdVelToMoveCmd(Node):
         self.declare_parameter('preset_goal_pose_topic', '/preset_current_goal')
         self.declare_parameter('plan_topic', '/plan')
         self.declare_parameter('global_plan_topic', '/global_plan')
+        self.declare_parameter('motion_lock_topic', '/base_motion/lock')
+        self.declare_parameter('linear_only_topic', '/base_motion/linear_only')
         self.declare_parameter('status_topic', '/cmd_vel_to_move_cmd/status')
         self.declare_parameter('base_frame', 'base_link')
-        self.declare_parameter('final_align_enabled', True)
+        self.declare_parameter('final_align_enabled', False)
         self.declare_parameter('final_align_xy_trigger', 0.08)
         self.declare_parameter('final_align_yaw_trigger', 0.18)
         self.declare_parameter('final_align_yaw_exit', 0.08)
@@ -64,6 +67,8 @@ class CmdVelToMoveCmd(Node):
         self.declare_parameter('final_align_max_linear_x', 0.02)
         self.declare_parameter('final_align_angular_kp', 1.2)
         self.declare_parameter('final_align_lookup_timeout_sec', 0.05)
+        self.declare_parameter('goal_stop_guard_enabled', True)
+        self.declare_parameter('goal_stop_xy_tolerance', 0.10)
 
         self._cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
         self._move_cmd_topic = self.get_parameter('move_cmd_topic').value
@@ -74,6 +79,9 @@ class CmdVelToMoveCmd(Node):
         self._max_angular_z = float(self.get_parameter('max_angular_z').value)
         self._max_angular_z_accel = float(
             self.get_parameter('max_angular_z_accel').value
+        )
+        self._min_nonzero_linear_x = max(
+            0.0, float(self.get_parameter('min_nonzero_linear_x').value)
         )
         self._min_nonzero_angular_z = max(
             0.0, float(self.get_parameter('min_nonzero_angular_z').value)
@@ -99,6 +107,8 @@ class CmdVelToMoveCmd(Node):
         ).value
         self._plan_topic = self.get_parameter('plan_topic').value
         self._global_plan_topic = self.get_parameter('global_plan_topic').value
+        self._motion_lock_topic = self.get_parameter('motion_lock_topic').value
+        self._linear_only_topic = self.get_parameter('linear_only_topic').value
         self._status_topic = self.get_parameter('status_topic').value
         self._base_frame = self.get_parameter('base_frame').value
         self._final_align_enabled = bool(
@@ -125,6 +135,12 @@ class CmdVelToMoveCmd(Node):
         self._final_align_lookup_timeout_sec = float(
             self.get_parameter('final_align_lookup_timeout_sec').value
         )
+        self._goal_stop_guard_enabled = bool(
+            self.get_parameter('goal_stop_guard_enabled').value
+        )
+        self._goal_stop_xy_tolerance = max(
+            0.0, float(self.get_parameter('goal_stop_xy_tolerance').value)
+        )
 
         self._last_angular_z = 0.0
         self._last_step_x = 0.0
@@ -132,6 +148,8 @@ class CmdVelToMoveCmd(Node):
         self._last_stamp: Optional[float] = None
         self._last_cmd_vel_rx_time: Optional[float] = None
         self._stopped_by_timeout = False
+        self._motion_locked = False
+        self._linear_only = False
         self._final_align_active = False
         self._goal_pose: Optional[PoseStamped] = None
         self._goal_pose_rx_time: float = 0.0
@@ -149,6 +167,7 @@ class CmdVelToMoveCmd(Node):
             'angular_z_cmd': 0.0,
             'step_x': 0.0,
             'step_y': 0.0,
+            'linear_only': False,
             'reason': 'startup',
         }
 
@@ -159,6 +178,12 @@ class CmdVelToMoveCmd(Node):
         self._status_pub = self.create_publisher(String, self._status_topic, 10)
         self._subscriber = self.create_subscription(
             Twist, self._cmd_vel_topic, self._cmd_vel_callback, 20
+        )
+        self._motion_lock_sub = self.create_subscription(
+            Bool, self._motion_lock_topic, self._motion_lock_callback, 10
+        )
+        self._linear_only_sub = self.create_subscription(
+            Bool, self._linear_only_topic, self._linear_only_callback, 10
         )
         self._goal_sub = self.create_subscription(
             PoseStamped, self._goal_pose_topic, self._goal_pose_callback, 10
@@ -181,9 +206,12 @@ class CmdVelToMoveCmd(Node):
             f'invert_linear_x={self._invert_linear_x}, '
             f'invert_angular_z={self._invert_angular_z}, '
             f'linear_x_scale={self._linear_x_scale}, angular_z_scale={self._angular_z_scale}, '
+            f'min_nonzero_linear_x={self._min_nonzero_linear_x}, '
             f'min_nonzero_angular_z={self._min_nonzero_angular_z}, '
             f'min_nonzero_angular_linear_x_threshold={self._min_nonzero_angular_linear_x_threshold}, '
             f'cmd_vel_timeout_sec={self._cmd_vel_timeout_sec}, '
+            f'motion_lock_topic={self._motion_lock_topic}, '
+            f'linear_only_topic={self._linear_only_topic}, '
             f'final_align_enabled={self._final_align_enabled}'
         )
 
@@ -256,6 +284,7 @@ class CmdVelToMoveCmd(Node):
         self._last_status_pub_sec = now
         self._last_status['step_x'] = round(step_x, 4)
         self._last_status['step_y'] = round(step_y, 4)
+        self._last_status['linear_only'] = bool(self._linear_only)
         msg = String()
         msg.data = json.dumps(self._last_status, ensure_ascii=False)
         self._status_pub.publish(msg)
@@ -398,7 +427,49 @@ class CmdVelToMoveCmd(Node):
         )
         self._publish_status(0.0, 0.0, force=True)
 
+    def _distance_to_active_goal(self) -> Tuple[Optional[PoseStamped], Optional[float]]:
+        goal_pose = self._get_active_goal_pose()
+        if goal_pose is None or not goal_pose.header.frame_id:
+            return goal_pose, None
+
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                goal_pose.header.frame_id,
+                self._base_frame,
+                Time(),
+                timeout=Duration(seconds=self._final_align_lookup_timeout_sec),
+            )
+        except TransformException:
+            return goal_pose, None
+
+        robot_x = transform.transform.translation.x
+        robot_y = transform.transform.translation.y
+        goal_x = goal_pose.pose.position.x
+        goal_y = goal_pose.pose.position.y
+        return goal_pose, math.hypot(goal_x - robot_x, goal_y - robot_y)
+
+    def _motion_lock_callback(self, msg: Bool) -> None:
+        locked = bool(msg.data)
+        if locked and not self._motion_locked:
+            self.get_logger().info('Base motion locked; publishing zero /move_cmd.')
+        elif not locked and self._motion_locked:
+            self.get_logger().info('Base motion unlocked.')
+        self._motion_locked = locked
+        if self._motion_locked:
+            self._publish_stop()
+
+    def _linear_only_callback(self, msg: Bool) -> None:
+        enabled = bool(msg.data)
+        if enabled and not self._linear_only:
+            self.get_logger().info('Linear-only segment active; angular /cmd_vel will be suppressed.')
+        elif not enabled and self._linear_only:
+            self.get_logger().info('Linear-only segment cleared.')
+        self._linear_only = enabled
+
     def _watchdog_callback(self) -> None:
+        if self._motion_locked:
+            self._publish_stop()
+            return
         if self._last_cmd_vel_rx_time is None:
             return
         now = self.get_clock().now().nanoseconds / 1e9
@@ -431,6 +502,29 @@ class CmdVelToMoveCmd(Node):
         self._last_cmd_vel_rx_time = self.get_clock().now().nanoseconds / 1e9
         self._stopped_by_timeout = False
 
+        if self._motion_locked:
+            self._publish_stop()
+            return
+
+        linear_requested = (
+            abs(msg.linear.x) >= self._deadzone
+            or abs(msg.linear.y) >= self._deadzone
+            or abs(msg.linear.z) >= self._deadzone
+        )
+        if self._goal_stop_guard_enabled and linear_requested:
+            goal_pose, goal_dist = self._distance_to_active_goal()
+            if goal_dist is not None and goal_dist <= self._goal_stop_xy_tolerance:
+                self._set_align_status(
+                    final_align_active=False,
+                    reason='goal_stop_guard',
+                    linear_x_cmd=0.0,
+                    angular_z_cmd=0.0,
+                    goal_pose=goal_pose,
+                    distance_m=goal_dist,
+                )
+                self._publish_stop()
+                return
+
         # Commanded stop should take effect immediately, not through smoothing ramp-down.
         if (
             abs(msg.linear.x) < self._deadzone
@@ -454,6 +548,11 @@ class CmdVelToMoveCmd(Node):
         angular_z = -msg.angular.z if self._invert_angular_z else msg.angular.z
         angular_z = clamp(angular_z, -self._max_angular_z, self._max_angular_z)
         linear_x, angular_z = self._maybe_apply_final_alignment(linear_x, angular_z)
+        if self._linear_only:
+            angular_z = 0.0
+        mostly_straight = abs(angular_z) <= self._min_nonzero_angular_linear_x_threshold
+        if mostly_straight and 0.0 < abs(linear_x) < self._min_nonzero_linear_x:
+            linear_x = self._min_nonzero_linear_x if linear_x > 0.0 else -self._min_nonzero_linear_x
         in_place_turn = (
             abs(linear_x) <= self._min_nonzero_angular_linear_x_threshold
         )

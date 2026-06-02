@@ -10,6 +10,8 @@ import rclpy
 import yaml
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Point, PoseStamped
+from lifecycle_msgs.msg import State
+from lifecycle_msgs.srv import GetState
 from nav2_msgs.action import NavigateToPose, Spin
 from nav_msgs.msg import Path
 from rclpy.action import ActionClient
@@ -19,6 +21,7 @@ from rclpy.time import Time
 from r2_arm_control.srv import SetArmState
 from std_msgs.msg import Bool, Int32, String
 from tf2_ros import Buffer, TransformException, TransformListener
+from vmc_quadruped_controller.msg import MoveCmd
 from vision_msgs.msg import Detection2DArray
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -36,6 +39,7 @@ class ArmTask:
     enabled: bool = False
     state: str = ''
     timeout_sec: float = 20.0
+    start_delay_sec: float = 1.0
     continue_on_failure: bool = False
 
 
@@ -53,6 +57,7 @@ class PlaceTask:
     target: str = 'auto'
     transfer_x: float = 3.85
     side_aisle_y: float = 1.55
+    centerline_y: float = 0.0
     return_to_next_pick: bool = True
     via_points: List[PlaceViaPoint] = field(default_factory=list)
 
@@ -72,6 +77,7 @@ class Waypoint:
     x: float
     y: float
     yaw: float
+    align_yaw: bool = False
     standoff_m: float = 0.0
     approach_yaw: Optional[float] = None
     carry_mode: str = ''
@@ -110,39 +116,65 @@ class PresetWaypointMission(Node):
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('action_name', '/navigate_to_pose')
         self.declare_parameter('spin_action_name', '/spin')
+        self.declare_parameter('wait_for_nav2_active', True)
+        self.declare_parameter(
+            'navigate_lifecycle_state_services',
+            ['/bt_navigator/get_state'],
+        )
+        self.declare_parameter(
+            'spin_lifecycle_state_services',
+            ['/behavior_server/get_state'],
+        )
         self.declare_parameter('auto_start', True)
         self.declare_parameter('loop_mission', False)
         self.declare_parameter('stop_on_failure', True)
         self.declare_parameter('retry_per_waypoint', 1)
         self.declare_parameter('pause_after_reach_sec', 0.2)
+        self.declare_parameter('same_position_spin_enabled', False)
         self.declare_parameter('same_position_tolerance', 0.05)
         self.declare_parameter('same_yaw_tolerance_deg', 5.0)
         self.declare_parameter('skip_already_reached_nav_goals', True)
         self.declare_parameter('already_reached_xy_tolerance', 0.18)
         self.declare_parameter('already_reached_yaw_tolerance_deg', 12.0)
+        self.declare_parameter('verify_reached_pose', True)
+        self.declare_parameter('reached_xy_tolerance', 0.25)
         self.declare_parameter('spin_time_allowance_sec', 20.0)
         self.declare_parameter('spin_lookup_timeout_sec', 0.10)
         self.declare_parameter('markers_topic', '/preset_waypoints')
         self.declare_parameter('route_topic', '/preset_route')
         self.declare_parameter('current_goal_topic', '/preset_current_goal')
         self.declare_parameter('marker_point_scale', 0.22)
-        self.declare_parameter('marker_text_scale', 0.18)
+        self.declare_parameter('marker_text_scale', 0.13)
         self.declare_parameter('publish_field_layout', True)
         self.declare_parameter('publish_task_item_zones', True)
         self.declare_parameter('yolo_enable_topic', '/yolo/enable')
         self.declare_parameter('yolo_detection_topic', '/yolo/detections')
         self.declare_parameter('yolo_result_topic', '/preset_yolo_result')
-        self.declare_parameter('yolo_result_text_scale', 0.14)
+        self.declare_parameter('yolo_result_text_scale', 0.12)
         self.declare_parameter('high_score_zone_topic', '/mission/high_score_zone')
         self.declare_parameter('arm_state_service_name', '/r2/arm/set_state')
         self.declare_parameter('arm_state_topic', '/r2/arm/state_machine_state')
         self.declare_parameter('arm_default_timeout_sec', 20.0)
+        self.declare_parameter('arm_start_settle_sec', 1.0)
+        self.declare_parameter('base_motion_lock_topic', '/base_motion/lock')
+        self.declare_parameter('base_motion_linear_only_topic', '/base_motion/linear_only')
+        self.declare_parameter('linear_only_x_tolerance', 0.15)
+        self.declare_parameter('move_cmd_topic', '/move_cmd')
 
         self._waypoint_file = str(self.get_parameter('waypoint_file').value)
         self._frame_id = str(self.get_parameter('frame_id').value)
         self._base_frame = str(self.get_parameter('base_frame').value)
         self._action_name = str(self.get_parameter('action_name').value)
         self._spin_action_name = str(self.get_parameter('spin_action_name').value)
+        self._wait_for_nav2_active = self._to_bool(
+            self.get_parameter('wait_for_nav2_active').value
+        )
+        self._navigate_lifecycle_state_services = self._to_string_list(
+            self.get_parameter('navigate_lifecycle_state_services').value
+        )
+        self._spin_lifecycle_state_services = self._to_string_list(
+            self.get_parameter('spin_lifecycle_state_services').value
+        )
         self._auto_start = self._to_bool(self.get_parameter('auto_start').value)
         self._loop_mission = self._to_bool(self.get_parameter('loop_mission').value)
         self._stop_on_failure = self._to_bool(
@@ -151,6 +183,9 @@ class PresetWaypointMission(Node):
         self._retry_per_waypoint = int(self.get_parameter('retry_per_waypoint').value)
         self._pause_after_reach_sec = float(
             self.get_parameter('pause_after_reach_sec').value
+        )
+        self._same_position_spin_enabled = self._to_bool(
+            self.get_parameter('same_position_spin_enabled').value
         )
         self._same_position_tolerance = max(
             0.0, float(self.get_parameter('same_position_tolerance').value)
@@ -166,6 +201,12 @@ class PresetWaypointMission(Node):
         )
         self._already_reached_yaw_tolerance = math.radians(
             float(self.get_parameter('already_reached_yaw_tolerance_deg').value)
+        )
+        self._verify_reached_pose = self._to_bool(
+            self.get_parameter('verify_reached_pose').value
+        )
+        self._reached_xy_tolerance = max(
+            0.0, float(self.get_parameter('reached_xy_tolerance').value)
         )
         self._spin_time_allowance_sec = max(
             0.0, float(self.get_parameter('spin_time_allowance_sec').value)
@@ -203,12 +244,32 @@ class PresetWaypointMission(Node):
         self._arm_default_timeout_sec = max(
             1.0, float(self.get_parameter('arm_default_timeout_sec').value)
         )
+        self._arm_start_settle_sec = max(
+            0.0, float(self.get_parameter('arm_start_settle_sec').value)
+        )
+        self._linear_only_x_tolerance = max(
+            0.0, float(self.get_parameter('linear_only_x_tolerance').value)
+        )
+        base_motion_lock_topic = str(
+            self.get_parameter('base_motion_lock_topic').value
+        )
+        base_motion_linear_only_topic = str(
+            self.get_parameter('base_motion_linear_only_topic').value
+        )
+        move_cmd_topic = str(self.get_parameter('move_cmd_topic').value)
 
         self._marker_pub = self.create_publisher(MarkerArray, markers_topic, 10)
         self._route_pub = self.create_publisher(Path, route_topic, 10)
         self._goal_pub = self.create_publisher(PoseStamped, current_goal_topic, 10)
         self._yolo_enable_pub = self.create_publisher(Bool, yolo_enable_topic, 10)
         self._yolo_result_pub = self.create_publisher(String, yolo_result_topic, 10)
+        self._base_motion_lock_pub = self.create_publisher(
+            Bool, base_motion_lock_topic, 10
+        )
+        self._base_motion_linear_only_pub = self.create_publisher(
+            Bool, base_motion_linear_only_topic, 10
+        )
+        self._move_cmd_pub = self.create_publisher(MoveCmd, move_cmd_topic, 10)
         self._yolo_sub = self.create_subscription(
             Detection2DArray,
             yolo_detection_topic,
@@ -230,6 +291,13 @@ class PresetWaypointMission(Node):
         self._arm_client = self.create_client(SetArmState, arm_state_service_name)
         self._action_client = ActionClient(self, NavigateToPose, self._action_name)
         self._spin_action_client = ActionClient(self, Spin, self._spin_action_name)
+        lifecycle_services = set(self._navigate_lifecycle_state_services)
+        lifecycle_services.update(self._spin_lifecycle_state_services)
+        self._nav2_lifecycle_clients = {
+            name: self.create_client(GetState, name)
+            for name in lifecycle_services
+            if name
+        }
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=True)
 
@@ -244,6 +312,10 @@ class PresetWaypointMission(Node):
         self._goal_in_flight = False
         self._next_send_time_sec = self._now_sec()
         self._last_wait_server_log_sec = 0.0
+        self._last_wait_nav2_active_log_sec = 0.0
+        self._nav2_lifecycle_futures = {}
+        self._nav2_lifecycle_state_ids = {}
+        self._nav2_lifecycle_last_query_sec = {}
         self._active_goal_kind = 'navigate'
         self._yolo_enabled = False
         self._yolo_task_active = False
@@ -261,15 +333,20 @@ class PresetWaypointMission(Node):
         self._arm_task_index: Optional[int] = None
         self._arm_request_sent = False
         self._arm_request_sent_sec = 0.0
+        self._arm_start_ready_sec = 0.0
         self._arm_deadline_sec = 0.0
         self._arm_future = None
         self._arm_current_state = ''
         self._arm_state_update_sec = 0.0
         self._last_wait_arm_service_log_sec = 0.0
+        self._base_motion_locked = False
 
         self._set_yolo_enabled(False, force=True)
+        self._set_base_motion_locked(False, force=True)
+        self._set_base_motion_linear_only(False)
 
         self.create_timer(0.2, self._tick)
+        self.create_timer(0.05, self._publish_arm_base_stop)
         self.create_timer(0.5, self._publish_visualization)
 
         self.get_logger().info(
@@ -291,6 +368,14 @@ class PresetWaypointMission(Node):
         if isinstance(value, str):
             return value.strip().lower() in ('1', 'true', 'yes', 'on')
         return bool(value)
+
+    @staticmethod
+    def _to_string_list(value) -> List[str]:
+        if isinstance(value, (list, tuple)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(',') if item.strip()]
+        return []
 
     def _parse_yolo_defaults(self, data) -> YoloTask:
         cfg = data if isinstance(data, dict) else {}
@@ -339,6 +424,9 @@ class PresetWaypointMission(Node):
         enabled = False
         state = ''
         timeout_sec = self._arm_default_timeout_sec
+        start_delay_sec = max(
+            0.0, float(item.get('arm_start_settle_sec', self._arm_start_settle_sec))
+        )
         continue_on_failure = False
 
         if isinstance(raw_cfg, dict):
@@ -346,6 +434,15 @@ class PresetWaypointMission(Node):
             enabled = self._to_bool(raw_cfg.get('enabled', bool(state)))
             timeout_sec = max(
                 1.0, float(raw_cfg.get('timeout_sec', timeout_sec))
+            )
+            start_delay_sec = max(
+                0.0,
+                float(
+                    raw_cfg.get(
+                        'start_delay_sec',
+                        raw_cfg.get('settle_sec', raw_cfg.get('delay_sec', start_delay_sec)),
+                    )
+                ),
             )
             continue_on_failure = self._to_bool(
                 raw_cfg.get('continue_on_failure', False)
@@ -364,6 +461,7 @@ class PresetWaypointMission(Node):
             enabled=enabled,
             state=state,
             timeout_sec=timeout_sec,
+            start_delay_sec=start_delay_sec,
             continue_on_failure=continue_on_failure,
         )
 
@@ -399,6 +497,7 @@ class PresetWaypointMission(Node):
         target = 'auto'
         transfer_x = 3.85
         side_aisle_y = 1.55
+        centerline_y = 0.0
         return_to_next_pick = True
         via_points: List[PlaceViaPoint] = []
 
@@ -407,6 +506,7 @@ class PresetWaypointMission(Node):
             target = str(raw_cfg.get('target', target)).strip()
             transfer_x = float(raw_cfg.get('transfer_x', transfer_x))
             side_aisle_y = float(raw_cfg.get('side_aisle_y', side_aisle_y))
+            centerline_y = float(raw_cfg.get('centerline_y', centerline_y))
             return_to_next_pick = self._to_bool(
                 raw_cfg.get('return_to_next_pick', return_to_next_pick)
             )
@@ -425,6 +525,7 @@ class PresetWaypointMission(Node):
             target=target,
             transfer_x=transfer_x,
             side_aisle_y=side_aisle_y,
+            centerline_y=centerline_y,
             return_to_next_pick=return_to_next_pick,
             via_points=via_points,
         )
@@ -446,6 +547,7 @@ class PresetWaypointMission(Node):
             return any(key in cfg for key in keys)
 
         if role in ('observe', 'scan', 'yolo'):
+            set_if_missing('align_yaw', True)
             set_if_missing('carry_mode', 'empty')
             if not has_any_key('yolo', 'yolo_enabled'):
                 cfg['yolo'] = True
@@ -454,6 +556,7 @@ class PresetWaypointMission(Node):
             if not has_any_key('place', 'place_after_pick'):
                 cfg['place'] = False
         elif role in ('pick', 'pickup', 'grab'):
+            set_if_missing('align_yaw', True)
             set_if_missing('carry_mode', 'empty')
             if not has_any_key('yolo', 'yolo_enabled'):
                 cfg['yolo'] = False
@@ -462,6 +565,7 @@ class PresetWaypointMission(Node):
             if not has_any_key('place', 'place_after_pick'):
                 cfg['place'] = False
         elif role in ('pick_auto_place', 'pick_place'):
+            set_if_missing('align_yaw', True)
             set_if_missing('carry_mode', 'empty')
             if not has_any_key('yolo', 'yolo_enabled'):
                 cfg['yolo'] = False
@@ -473,11 +577,13 @@ class PresetWaypointMission(Node):
                     'target': str(cfg.get('target', 'auto')).strip() or 'auto',
                     'transfer_x': float(cfg.get('transfer_x', 3.85)),
                     'side_aisle_y': float(cfg.get('side_aisle_y', 1.55)),
+                    'centerline_y': float(cfg.get('centerline_y', 0.0)),
                     'return_to_next_pick': self._to_bool(
                         cfg.get('return_to_next_pick', True)
                     ),
                 }
         elif role in ('carry', 'via', 'carry_via', 'transfer', 'approach_place'):
+            set_if_missing('align_yaw', False)
             set_if_missing('carry_mode', 'carry')
             if not has_any_key('yolo', 'yolo_enabled'):
                 cfg['yolo'] = False
@@ -486,6 +592,7 @@ class PresetWaypointMission(Node):
             if not has_any_key('place', 'place_after_pick'):
                 cfg['place'] = False
         elif role in ('place', 'place_auto', 'drop'):
+            set_if_missing('align_yaw', True)
             set_if_missing('carry_mode', 'place')
             if not has_any_key('yolo', 'yolo_enabled'):
                 cfg['yolo'] = False
@@ -497,6 +604,7 @@ class PresetWaypointMission(Node):
                     'target': str(cfg.get('target', 'auto')).strip() or 'auto',
                 }
         elif role in ('return', 'empty', 'exit', 'transit'):
+            set_if_missing('align_yaw', False)
             set_if_missing('carry_mode', 'empty')
             if not has_any_key('yolo', 'yolo_enabled'):
                 cfg['yolo'] = False
@@ -505,6 +613,7 @@ class PresetWaypointMission(Node):
             if not has_any_key('place', 'place_after_pick'):
                 cfg['place'] = False
         elif role == 'store':
+            set_if_missing('align_yaw', False)
             set_if_missing('carry_mode', 'carry')
             if not has_any_key('yolo', 'yolo_enabled'):
                 cfg['yolo'] = False
@@ -520,12 +629,13 @@ class PresetWaypointMission(Node):
         return str(value).strip().lower().replace(' ', '').replace('_', '').replace('-', '')
 
     def _is_arm_task_complete(self, requested_state: str) -> bool:
+        # The arm state machine auto-chains pick -> store and place -> idle. Mission
+        # flow should wait for the chained safe/carry state before moving the base.
+        if requested_state == 'pick':
+            return self._arm_current_state == 'store'
+        if requested_state == 'place':
+            return self._arm_current_state == 'idle'
         if self._arm_current_state == requested_state:
-            return True
-        # Support auto-chain: pick -> store, place -> idle
-        if requested_state == 'pick' and self._arm_current_state == 'store':
-            return True
-        if requested_state == 'place' and self._arm_current_state == 'idle':
             return True
         return False
 
@@ -618,6 +728,7 @@ class PresetWaypointMission(Node):
                     x=x,
                     y=y,
                     yaw=yaw,
+                    align_yaw=self._to_bool(item.get('align_yaw', False)),
                     standoff_m=standoff_m,
                     approach_yaw=approach_yaw,
                     carry_mode=str(item.get('carry_mode', '')).strip().lower(),
@@ -736,10 +847,15 @@ class PresetWaypointMission(Node):
             x=x,
             y=y,
             yaw=yaw,
+            align_yaw=arm_state in ('pick', 'place'),
             carry_mode=carry_mode,
             target_class=target_class,
             yolo=YoloTask(enabled=False),
-            arm=ArmTask(enabled=bool(arm_state), state=arm_state),
+            arm=ArmTask(
+                enabled=bool(arm_state),
+                state=arm_state,
+                start_delay_sec=self._arm_start_settle_sec,
+            ),
             place=PlaceTask(enabled=False),
         )
 
@@ -750,6 +866,81 @@ class PresetWaypointMission(Node):
             for char in str(value).strip()
         ).strip('_')
         return suffix or fallback
+
+    def _append_nav_waypoint_if_distinct(
+        self,
+        route: List[Waypoint],
+        name: str,
+        x: float,
+        y: float,
+        yaw: float,
+        carry_mode: str,
+        target_class: str = '',
+        min_distance: float = 0.08,
+    ) -> None:
+        if route:
+            prev_x = route[-1].x
+            prev_y = route[-1].y
+        elif self._index < len(self._waypoints):
+            prev_x = self._waypoints[self._index].x
+            prev_y = self._waypoints[self._index].y
+        else:
+            prev_x = x
+            prev_y = y
+
+        if math.hypot(x - prev_x, y - prev_y) < min_distance:
+            return
+
+        route.append(
+            self._make_waypoint(
+                name,
+                x,
+                y,
+                yaw,
+                carry_mode=carry_mode,
+                target_class=target_class,
+            )
+        )
+
+    def _append_spin_waypoint_if_needed(
+        self,
+        route: List[Waypoint],
+        name: str,
+        x: float,
+        y: float,
+        yaw: float,
+        carry_mode: str,
+        target_class: str = '',
+    ) -> None:
+        if route:
+            prev_x = route[-1].x
+            prev_y = route[-1].y
+            prev_yaw = self._effective_yaw(route[-1])
+        elif self._index < len(self._waypoints):
+            prev = self._waypoints[self._index]
+            prev_x = prev.x
+            prev_y = prev.y
+            prev_yaw = self._effective_yaw(prev)
+        else:
+            prev_x = x
+            prev_y = y
+            prev_yaw = yaw
+
+        if math.hypot(x - prev_x, y - prev_y) > self._same_position_tolerance:
+            return
+        if abs(normalize_angle(yaw - prev_yaw)) <= self._same_yaw_tolerance:
+            return
+
+        route.append(
+            self._make_waypoint(
+                name,
+                x,
+                y,
+                yaw,
+                carry_mode=carry_mode,
+                target_class=target_class,
+            )
+        )
 
     def _insert_dynamic_place_route(self, wp: Waypoint) -> bool:
         if not wp.place.enabled or wp.name in self._dynamic_place_inserted_for:
@@ -769,19 +960,8 @@ class PresetWaypointMission(Node):
 
         transfer_x = wp.place.transfer_x
         side_aisle_y = wp.place.side_aisle_y
+        centerline_y = wp.place.centerline_y
         route: List[Waypoint] = []
-
-        route.append(
-            self._make_waypoint(
-                f'{wp.name}_STORE',
-                wp.x,
-                wp.y,
-                wp.yaw,
-                'store',
-                carry_mode='carry',
-                target_class=wp.target_class,
-            )
-        )
 
         if wp.place.via_points:
             for i, via in enumerate(wp.place.via_points):
@@ -804,25 +984,72 @@ class PresetWaypointMission(Node):
                     )
                 )
         else:
-            route.append(
-                self._make_waypoint(
-                    f'{wp.name}_TRANSFER',
-                    transfer_x,
-                    wp.y,
-                    self._heading_from_delta(transfer_x - wp.x, 0.0, wp.yaw),
-                    carry_mode='carry',
-                    target_class=target.name,
-                )
+            centerline_yaw = self._heading_from_delta(0.0, centerline_y - wp.y, wp.yaw)
+            self._append_spin_waypoint_if_needed(
+                route,
+                f'{wp.name}_TURN_CENTERLINE',
+                wp.x,
+                wp.y,
+                centerline_yaw,
+                'carry',
+                target.name,
             )
-            route.append(
-                self._make_waypoint(
-                    f'{wp.name}_ALIGN_PLACE_{target.name}',
-                    transfer_x,
-                    target.y,
-                    self._heading_from_delta(0.0, target.y - wp.y, 0.0),
-                    carry_mode='carry',
-                    target_class=target.name,
-                )
+            self._append_nav_waypoint_if_distinct(
+                route,
+                f'{wp.name}_CENTERLINE',
+                wp.x,
+                centerline_y,
+                centerline_yaw,
+                'carry',
+                target.name,
+            )
+            self._append_spin_waypoint_if_needed(
+                route,
+                f'{wp.name}_TURN_TRANSFER',
+                wp.x,
+                centerline_y,
+                0.0,
+                'carry',
+                target.name,
+            )
+            self._append_nav_waypoint_if_distinct(
+                route,
+                f'{wp.name}_TRANSFER',
+                transfer_x,
+                centerline_y,
+                self._heading_from_delta(transfer_x - wp.x, 0.0, wp.yaw),
+                'carry',
+                target.name,
+            )
+            place_approach_yaw = self._heading_from_delta(
+                0.0, target.y - centerline_y, 0.0
+            )
+            self._append_spin_waypoint_if_needed(
+                route,
+                f'{wp.name}_TURN_PLACE_ROW_{target.name}',
+                transfer_x,
+                centerline_y,
+                place_approach_yaw,
+                'carry',
+                target.name,
+            )
+            self._append_nav_waypoint_if_distinct(
+                route,
+                f'{wp.name}_ALIGN_PLACE_{target.name}',
+                transfer_x,
+                target.y,
+                place_approach_yaw,
+                'carry',
+                target.name,
+            )
+            self._append_spin_waypoint_if_needed(
+                route,
+                f'{wp.name}_TURN_PLACE_{target.name}',
+                transfer_x,
+                target.y,
+                target.yaw,
+                'carry',
+                target.name,
             )
         route.append(
             self._make_waypoint(
@@ -878,13 +1105,17 @@ class PresetWaypointMission(Node):
         insert_at = self._index + 1
         self._waypoints[insert_at:insert_at] = route
         self._dynamic_place_inserted_for.add(wp.name)
+        route_names = ' -> '.join(item.name for item in route)
         self.get_logger().info(
             f'Inserted dynamic place route after {wp.name}: target={target.name}, '
-            f'inserted_waypoints={len(route)}'
+            f'inserted_waypoints={len(route)}, route={route_names}'
         )
         return True
 
     def _should_spin_to_current_waypoint(self) -> bool:
+        if not self._same_position_spin_enabled:
+            return False
+
         previous = self._get_previous_waypoint()
         if previous is None or self._index >= len(self._waypoints):
             return False
@@ -946,6 +1177,12 @@ class PresetWaypointMission(Node):
         xy_delta = math.hypot(wp.x - robot_x, wp.y - robot_y)
         yaw_delta = abs(normalize_angle(self._effective_yaw(wp) - robot_yaw))
         if (
+            self._same_position_spin_enabled
+            and xy_delta <= self._same_position_tolerance
+            and yaw_delta > self._same_yaw_tolerance
+        ):
+            return False
+        if (
             xy_delta <= self._already_reached_xy_tolerance
             and yaw_delta <= self._already_reached_yaw_tolerance
         ):
@@ -957,6 +1194,67 @@ class PresetWaypointMission(Node):
             return True
 
         return False
+
+    def _verify_nav_result_pose(self, wp: Waypoint) -> bool:
+        if not self._verify_reached_pose:
+            return True
+
+        pose = self._get_robot_pose_for_skip(log_on_failure=True)
+        if pose is None:
+            self.get_logger().warn(
+                f'Nav2 reported success for {wp.name}, but current robot pose could not be checked.'
+            )
+            return False
+
+        robot_x, robot_y, _ = pose
+        goal_pose = self._build_pose(wp)
+        goal_x = float(goal_pose.pose.position.x)
+        goal_y = float(goal_pose.pose.position.y)
+        distance = math.hypot(goal_x - robot_x, goal_y - robot_y)
+        if distance <= self._reached_xy_tolerance:
+            self.get_logger().info(
+                f'Verified waypoint pose {wp.name}: robot=({robot_x:.3f}, {robot_y:.3f}), '
+                f'goal=({goal_x:.3f}, {goal_y:.3f}), distance={distance:.3f}m'
+            )
+            return True
+
+        self.get_logger().warn(
+            f'Nav2 reported success for {wp.name}, but robot is still {distance:.3f}m '
+            f'from the waypoint: robot=({robot_x:.3f}, {robot_y:.3f}), '
+            f'goal=({goal_x:.3f}, {goal_y:.3f}), tolerance={self._reached_xy_tolerance:.3f}m'
+        )
+        return False
+
+    def _verify_spin_result_yaw(self, wp: Waypoint) -> bool:
+        pose = self._get_robot_pose_for_skip(log_on_failure=True)
+        if pose is None:
+            self.get_logger().warn(
+                f'Spin reported success for {wp.name}, but current robot pose could not be checked.'
+            )
+            return False
+
+        robot_x, robot_y, robot_yaw = pose
+        yaw_delta = abs(normalize_angle(self._effective_yaw(wp) - robot_yaw))
+        distance = math.hypot(wp.x - robot_x, wp.y - robot_y)
+        if yaw_delta > self._same_yaw_tolerance:
+            self.get_logger().warn(
+                f'Spin reported success for {wp.name}, but yaw error is still '
+                f'{yaw_delta:.3f}rad; tolerance={self._same_yaw_tolerance:.3f}rad'
+            )
+            return False
+
+        if distance > self._reached_xy_tolerance:
+            self.get_logger().warn(
+                f'Spin drifted during {wp.name}: robot=({robot_x:.3f}, {robot_y:.3f}), '
+                f'goal=({wp.x:.3f}, {wp.y:.3f}), distance={distance:.3f}m. '
+                'Continuing because spin waypoints verify yaw only.'
+            )
+        else:
+            self.get_logger().info(
+                f'Verified spin yaw {wp.name}: yaw_delta={yaw_delta:.3f}rad, '
+                f'drift={distance:.3f}m'
+            )
+        return True
 
     def _wait_for_current_action_server(self, now_sec: float) -> bool:
         action_client = (
@@ -983,6 +1281,78 @@ class PresetWaypointMission(Node):
             )
         return False
 
+    def _required_lifecycle_services_for_current_goal(self) -> List[str]:
+        if not self._wait_for_nav2_active:
+            return []
+        if self._should_spin_to_current_waypoint():
+            return self._spin_lifecycle_state_services
+        return self._navigate_lifecycle_state_services
+
+    def _lifecycle_service_active(self, service_name: str, now_sec: float) -> bool:
+        client = self._nav2_lifecycle_clients.get(service_name)
+        if client is None:
+            return False
+
+        if not client.wait_for_service(timeout_sec=0.0):
+            return False
+
+        future = self._nav2_lifecycle_futures.get(service_name)
+        if future is not None:
+            if not future.done():
+                return (
+                    self._nav2_lifecycle_state_ids.get(service_name)
+                    == State.PRIMARY_STATE_ACTIVE
+                )
+
+            try:
+                response = future.result()
+                state_id = response.current_state.id if response is not None else 0
+            except Exception as exc:
+                self.get_logger().warn(
+                    f'Failed to query Nav2 lifecycle state from {service_name}: {exc}'
+                )
+                state_id = 0
+
+            self._nav2_lifecycle_state_ids[service_name] = state_id
+            self._nav2_lifecycle_futures.pop(service_name, None)
+            if state_id == State.PRIMARY_STATE_ACTIVE:
+                return True
+
+        if (
+            self._nav2_lifecycle_state_ids.get(service_name)
+            == State.PRIMARY_STATE_ACTIVE
+        ):
+            return True
+
+        last_query_sec = self._nav2_lifecycle_last_query_sec.get(service_name, 0.0)
+        if (now_sec - last_query_sec) >= 0.5:
+            self._nav2_lifecycle_futures[service_name] = client.call_async(
+                GetState.Request()
+            )
+            self._nav2_lifecycle_last_query_sec[service_name] = now_sec
+        return False
+
+    def _wait_for_nav2_lifecycle_active(self, now_sec: float) -> bool:
+        required_services = self._required_lifecycle_services_for_current_goal()
+        if not required_services:
+            return True
+
+        pending_services = [
+            service_name
+            for service_name in required_services
+            if not self._lifecycle_service_active(service_name, now_sec)
+        ]
+        if not pending_services:
+            return True
+
+        if (now_sec - self._last_wait_nav2_active_log_sec) > 2.0:
+            self._last_wait_nav2_active_log_sec = now_sec
+            self.get_logger().info(
+                'Waiting for Nav2 lifecycle ACTIVE before sending waypoint: '
+                + ', '.join(pending_services)
+            )
+        return False
+
     def _set_yolo_enabled(self, enabled: bool, force: bool = False) -> None:
         if not force and self._yolo_enabled == enabled:
             return
@@ -994,6 +1364,38 @@ class PresetWaypointMission(Node):
         self.get_logger().info(
             f'YOLO detection {"enabled" if enabled else "disabled"} for mission flow.'
         )
+
+    def _publish_base_stop(self) -> None:
+        msg = MoveCmd()
+        msg.step_x = 0.0
+        msg.step_y = 0.0
+        self._move_cmd_pub.publish(msg)
+
+    def _set_base_motion_locked(self, locked: bool, force: bool = False) -> None:
+        if not force and self._base_motion_locked == locked:
+            return
+
+        self._base_motion_locked = locked
+        msg = Bool()
+        msg.data = locked
+        self._base_motion_lock_pub.publish(msg)
+        self._publish_base_stop()
+        self.get_logger().info(
+            f'Base motion {"locked" if locked else "unlocked"} for arm task.'
+        )
+
+    def _set_base_motion_linear_only(self, enabled: bool) -> None:
+        msg = Bool()
+        msg.data = bool(enabled)
+        self._base_motion_linear_only_pub.publish(msg)
+
+    def _publish_arm_base_stop(self) -> None:
+        if not self._arm_task_active:
+            return
+        msg = Bool()
+        msg.data = True
+        self._base_motion_lock_pub.publish(msg)
+        self._publish_base_stop()
 
     def _high_score_zone_callback(self, msg: Int32) -> None:
         zone = int(msg.data)
@@ -1048,6 +1450,9 @@ class PresetWaypointMission(Node):
         if not self._wait_for_current_action_server(now_sec):
             return
 
+        if not self._wait_for_nav2_lifecycle_active(now_sec):
+            return
+
         self._send_current_goal()
 
     def _tick_yolo_task(self) -> None:
@@ -1067,7 +1472,19 @@ class PresetWaypointMission(Node):
             self._handle_arm_failure(wp, 'timeout')
             return
 
+        if not self._arm_request_sent and now_sec < self._arm_start_ready_sec:
+            self._publish_arm_base_stop()
+            return
+
         if not self._arm_request_sent:
+            if self._is_arm_task_complete(wp.arm.state) and self._arm_state_update_sec > 0.0:
+                self.get_logger().info(
+                    f'Arm task already satisfied at {wp.name}: '
+                    f'requested={wp.arm.state}, current={self._arm_current_state}'
+                )
+                self._finish_arm_task()
+                return
+
             if not self._arm_client.wait_for_service(timeout_sec=0.0):
                 if (now_sec - self._last_wait_arm_service_log_sec) > 2.0:
                     self._last_wait_arm_service_log_sec = now_sec
@@ -1118,8 +1535,10 @@ class PresetWaypointMission(Node):
             self.get_logger().info(
                 f'Arm task finished at {wp.name}: state={self._arm_current_state}'
             )
-            if wp.arm.state == 'pick':
-                self._insert_dynamic_place_route(wp)
+            if wp.arm.state == 'pick' and wp.place.enabled:
+                if not self._insert_dynamic_place_route(wp):
+                    self._handle_dynamic_place_route_failure(wp)
+                    return
             self._finish_arm_task()
 
     def _send_current_goal(self) -> None:
@@ -1128,15 +1547,19 @@ class PresetWaypointMission(Node):
         self._goal_pub.publish(goal_pose)
 
         if self._should_spin_to_current_waypoint():
+            self._set_base_motion_linear_only(False)
             self._send_spin_goal(wp)
             return
 
+        linear_only = self._is_axis_aligned_linear_only_segment(wp)
+        self._set_base_motion_linear_only(linear_only)
         goal = NavigateToPose.Goal()
         goal.pose = goal_pose
         self.get_logger().info(
             f'Sending waypoint [{self._index + 1}/{len(self._waypoints)}] '
             f'{wp.name}: x={wp.x:.3f}, y={wp.y:.3f}, yaw={self._effective_yaw(wp):.3f}, '
-            f'carry_mode={wp.carry_mode or "none"}, target_class={wp.target_class or "auto"}'
+            f'carry_mode={wp.carry_mode or "none"}, target_class={wp.target_class or "auto"}, '
+            f'linear_only={linear_only}'
         )
         future = self._action_client.send_goal_async(goal)
         future.add_done_callback(self._on_goal_response)
@@ -1165,6 +1588,36 @@ class PresetWaypointMission(Node):
         future.add_done_callback(self._on_spin_goal_response)
         self._active_goal_kind = 'spin'
         self._goal_in_flight = True
+
+    def _is_axis_aligned_linear_only_segment(self, wp: Waypoint) -> bool:
+        pose = self._get_robot_pose_for_skip(log_on_failure=True)
+        if pose is None:
+            return False
+
+        robot_x, robot_y, _ = pose
+        x_error = abs(wp.x - robot_x)
+        y_error = abs(wp.y - robot_y)
+        moving_y = x_error <= self._linear_only_x_tolerance and y_error > self._same_position_tolerance
+        moving_x = y_error <= self._linear_only_x_tolerance and x_error > self._same_position_tolerance
+        return moving_x or moving_y
+
+    def _send_final_yaw_spin_if_needed(self, wp: Waypoint) -> bool:
+        if not wp.align_yaw:
+            return False
+
+        robot_yaw = self._get_robot_yaw()
+        if robot_yaw is None:
+            return False
+
+        yaw_delta = abs(normalize_angle(self._effective_yaw(wp) - robot_yaw))
+        if yaw_delta <= self._same_yaw_tolerance:
+            return False
+
+        self.get_logger().info(
+            f'Final yaw alignment needed at {wp.name}: yaw_delta={yaw_delta:.3f}rad'
+        )
+        self._send_spin_goal(wp)
+        return True
 
     def _on_goal_response(self, future) -> None:
         try:
@@ -1310,11 +1763,15 @@ class PresetWaypointMission(Node):
         self._arm_request_sent = False
         self._arm_request_sent_sec = 0.0
         self._arm_future = None
-        self._arm_deadline_sec = now_sec + wp.arm.timeout_sec
+        self._arm_start_ready_sec = now_sec + wp.arm.start_delay_sec
+        self._arm_deadline_sec = self._arm_start_ready_sec + wp.arm.timeout_sec
         self._active_goal_kind = 'arm'
+        self._set_base_motion_linear_only(False)
+        self._set_base_motion_locked(True)
         self.get_logger().info(
             f'Starting arm task at waypoint {wp.name}: '
-            f'state={wp.arm.state}, timeout={wp.arm.timeout_sec:.1f}s'
+            f'state={wp.arm.state}, settle={wp.arm.start_delay_sec:.1f}s, '
+            f'timeout={wp.arm.timeout_sec:.1f}s'
         )
 
     def _finish_arm_task(self) -> None:
@@ -1322,7 +1779,10 @@ class PresetWaypointMission(Node):
         self._arm_task_index = None
         self._arm_request_sent = False
         self._arm_request_sent_sec = 0.0
+        self._arm_start_ready_sec = 0.0
         self._arm_future = None
+        self._set_base_motion_linear_only(False)
+        self._set_base_motion_locked(False)
         self._complete_waypoint()
 
     def _complete_waypoint(self) -> None:
@@ -1372,11 +1832,27 @@ class PresetWaypointMission(Node):
 
         if status == GoalStatus.STATUS_SUCCEEDED:
             wp = self._waypoints[self._index]
+            if self._active_goal_kind == 'navigate' and not self._verify_nav_result_pose(wp):
+                self._goal_in_flight = False
+                self._set_base_motion_linear_only(False)
+                self._handle_goal_failure('pose_verify_failed')
+                return
+
+            if self._active_goal_kind == 'spin' and not self._verify_spin_result_yaw(wp):
+                self._goal_in_flight = False
+                self._set_base_motion_linear_only(False)
+                self._handle_goal_failure('spin_yaw_verify_failed')
+                return
+
             self.get_logger().info(
                 f'Waypoint reached [{self._index + 1}/{len(self._waypoints)}] '
                 f'({self._active_goal_kind}): {wp.name}'
             )
             self._goal_in_flight = False
+            self._set_base_motion_linear_only(False)
+
+            if self._active_goal_kind == 'navigate' and self._send_final_yaw_spin_if_needed(wp):
+                return
 
             if wp.yolo.enabled:
                 self._start_yolo_task(wp)
@@ -1399,7 +1875,10 @@ class PresetWaypointMission(Node):
         self._arm_task_index = None
         self._arm_request_sent = False
         self._arm_request_sent_sec = 0.0
+        self._arm_start_ready_sec = 0.0
         self._arm_future = None
+        self._set_base_motion_linear_only(False)
+        self._set_base_motion_locked(False)
 
         if wp.arm.continue_on_failure:
             self.get_logger().warn(
@@ -1411,6 +1890,22 @@ class PresetWaypointMission(Node):
         self._mission_done = True
         self._set_yolo_enabled(False)
         self.get_logger().error('Mission stopped due to arm task failure.')
+
+    def _handle_dynamic_place_route_failure(self, wp: Waypoint) -> None:
+        self.get_logger().error(
+            f'Failed to insert dynamic place route after {wp.name}; '
+            'mission stopped to avoid carrying a box without a valid place target.'
+        )
+        self._arm_task_active = False
+        self._arm_task_index = None
+        self._arm_request_sent = False
+        self._arm_request_sent_sec = 0.0
+        self._arm_start_ready_sec = 0.0
+        self._arm_future = None
+        self._set_base_motion_linear_only(False)
+        self._set_base_motion_locked(False)
+        self._set_yolo_enabled(False)
+        self._mission_done = True
 
     def _handle_goal_failure(self, reason: str) -> None:
         wp = self._waypoints[self._index]
@@ -1435,7 +1930,10 @@ class PresetWaypointMission(Node):
         self._arm_task_index = None
         self._arm_request_sent = False
         self._arm_request_sent_sec = 0.0
+        self._arm_start_ready_sec = 0.0
         self._arm_future = None
+        self._set_base_motion_linear_only(False)
+        self._set_base_motion_locked(False)
 
         if self._stop_on_failure:
             self._mission_done = True
@@ -1541,6 +2039,24 @@ class PresetWaypointMission(Node):
             pt.z = z
             marker.points.append(pt)
         markers.markers.append(marker)
+
+    @staticmethod
+    def _waypoint_text_style(wp: Waypoint, index: int) -> tuple[float, float, tuple[float, float, float, float], str]:
+        if wp.yolo.enabled:
+            return -0.18, 0.22, (0.0, 0.95, 1.0, 1.0), 'YOLO'
+        if wp.arm.enabled:
+            if wp.arm.state == 'pick':
+                return 0.18, -0.22, (1.0, 0.45, 0.05, 1.0), 'PICK'
+            if wp.arm.state == 'place':
+                return 0.20, -0.25, (0.1, 1.0, 0.35, 1.0), 'PLACE'
+            if wp.arm.state == 'store':
+                return 0.0, 0.24, (0.75, 0.65, 1.0, 1.0), 'STORE'
+            return 0.18, -0.22, (1.0, 0.75, 0.15, 1.0), wp.arm.state.upper()
+        if wp.carry_mode == 'carry':
+            return 0.0, 0.24 + 0.08 * (index % 2), (0.35, 0.75, 1.0, 1.0), 'CARRY'
+        if wp.carry_mode == 'place':
+            return 0.20, -0.25, (0.1, 1.0, 0.35, 1.0), 'PLACE'
+        return 0.0, 0.20 + 0.08 * (index % 2), (0.95, 0.95, 0.95, 1.0), 'NAV'
 
     def _append_field_layout_markers(self, markers: MarkerArray, stamp) -> None:
         # Task-field dimensions from 2026 V2.0 figure 3/4, in meters.
@@ -1961,6 +2477,7 @@ class PresetWaypointMission(Node):
             markers.markers.append(yolo_points)
 
         for i, wp in enumerate(self._waypoints):
+            text_dx, text_dy, text_color, text_badge = self._waypoint_text_style(wp, i)
             text = Marker()
             text.header.stamp = stamp
             text.header.frame_id = self._frame_id
@@ -1968,20 +2485,16 @@ class PresetWaypointMission(Node):
             text.id = 100 + i
             text.type = Marker.TEXT_VIEW_FACING
             text.action = Marker.ADD
-            text.pose.position.x = wp.x
-            text.pose.position.y = wp.y
-            text.pose.position.z = 0.35
+            text.pose.position.x = wp.x + text_dx
+            text.pose.position.y = wp.y + text_dy
+            text.pose.position.z = 0.42
             text.pose.orientation.w = 1.0
             text.scale.z = self._marker_text_scale
-            text.color.a = 1.0
-            text.color.r = 1.0
-            text.color.g = 1.0
-            text.color.b = 0.0
-            label = f'{i + 1:02d}:{wp.name}'
-            if wp.yolo.enabled:
-                label += ' [YOLO]'
-            if wp.arm.enabled:
-                label += f' [ARM:{wp.arm.state}]'
+            text.color.r = text_color[0]
+            text.color.g = text_color[1]
+            text.color.b = text_color[2]
+            text.color.a = text_color[3]
+            label = f'{i + 1:02d} {wp.name}\n{text_badge}'
             text.text = label
             markers.markers.append(text)
 
@@ -1995,9 +2508,9 @@ class PresetWaypointMission(Node):
             result.id = 300 + i
             result.type = Marker.TEXT_VIEW_FACING
             result.action = Marker.ADD
-            result.pose.position.x = wp.x
-            result.pose.position.y = wp.y
-            result.pose.position.z = 0.55
+            result.pose.position.x = wp.x + 0.26
+            result.pose.position.y = wp.y + 0.34
+            result.pose.position.z = 0.62
             result.pose.orientation.w = 1.0
             result.scale.z = self._yolo_result_text_scale
             result.color.a = 1.0

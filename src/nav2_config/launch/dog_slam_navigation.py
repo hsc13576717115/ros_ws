@@ -19,6 +19,9 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 def generate_launch_description():
     nav2_config_dir = get_package_share_directory('nav2_config')
     vmc_config_dir = get_package_share_directory('vmc_quadruped_controller')
+    default_waypoint_file = '/home/orangepi/ros_ws/src/nav2_config/config/preset_waypoints.yaml'
+    if not os.path.exists(default_waypoint_file):
+        default_waypoint_file = os.path.join(nav2_config_dir, 'config', 'preset_waypoints.yaml')
 
     start_dog_arg = DeclareLaunchArgument(
         'start_dog',
@@ -137,7 +140,7 @@ def generate_launch_description():
     )
     body_yaw_arg = DeclareLaunchArgument(
         'body_yaw_deg',
-        default_value='90.0',
+        default_value='0.0',
         description='Static TF yaw from base_link_raw to corrected base_link (degrees)'
     )
 
@@ -173,7 +176,7 @@ def generate_launch_description():
 
     yolo_publish_image_arg = DeclareLaunchArgument(
         'yolo_publish_image',
-        default_value='true',
+        default_value='false',
         description='Publish YOLO image topic for RViz'
     )
 
@@ -191,7 +194,7 @@ def generate_launch_description():
 
     waypoint_file_arg = DeclareLaunchArgument(
         'waypoint_file',
-        default_value=os.path.join(nav2_config_dir, 'config', 'preset_waypoints.yaml'),
+        default_value=default_waypoint_file,
         description='YAML file path for preset waypoints'
     )
 
@@ -199,6 +202,24 @@ def generate_launch_description():
         'preset_mission_loop',
         default_value='false',
         description='Loop preset mission after the last waypoint'
+    )
+
+    arm_start_settle_arg = DeclareLaunchArgument(
+        'arm_start_settle_sec',
+        default_value='1.0',
+        description='Seconds to lock and stop the base before starting an arm waypoint task'
+    )
+
+    verify_reached_pose_arg = DeclareLaunchArgument(
+        'verify_reached_pose',
+        default_value='true',
+        description='Verify map->base_link pose after Nav2 success before running waypoint side effects'
+    )
+
+    reached_xy_tolerance_arg = DeclareLaunchArgument(
+        'reached_xy_tolerance',
+        default_value='0.25',
+        description='Maximum map-frame XY distance allowed after Nav2 reports waypoint success'
     )
 
     dog_launch = IncludeLaunchDescription(
@@ -249,6 +270,9 @@ def generate_launch_description():
                 'yolo_camera_id': LaunchConfiguration('yolo_camera_id'),
                 'waypoint_file': LaunchConfiguration('waypoint_file'),
                 'preset_mission_loop': LaunchConfiguration('preset_mission_loop'),
+                'arm_start_settle_sec': LaunchConfiguration('arm_start_settle_sec'),
+                'verify_reached_pose': LaunchConfiguration('verify_reached_pose'),
+                'reached_xy_tolerance': LaunchConfiguration('reached_xy_tolerance'),
             }.items(),
         )
 
@@ -284,6 +308,9 @@ def generate_launch_description():
         yolo_camera_id_arg,
         waypoint_file_arg,
         preset_mission_loop_arg,
+        arm_start_settle_arg,
+        verify_reached_pose_arg,
+        reached_xy_tolerance_arg,
         dog_launch,
         TimerAction(
             period=8.0,
@@ -320,6 +347,9 @@ def generate_launch_description():
                 'yolo_camera_id': LaunchConfiguration('yolo_camera_id'),
                 'waypoint_file': LaunchConfiguration('waypoint_file'),
                 'preset_mission_loop': LaunchConfiguration('preset_mission_loop'),
+                'arm_start_settle_sec': LaunchConfiguration('arm_start_settle_sec'),
+                'verify_reached_pose': LaunchConfiguration('verify_reached_pose'),
+                'reached_xy_tolerance': LaunchConfiguration('reached_xy_tolerance'),
             }.items(),
         ),
     ])

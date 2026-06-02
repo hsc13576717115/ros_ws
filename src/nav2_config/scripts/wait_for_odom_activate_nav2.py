@@ -3,8 +3,6 @@
 from typing import Optional
 
 import rclpy
-from lifecycle_msgs.msg import State
-from lifecycle_msgs.srv import GetState
 from nav2_msgs.srv import ManageLifecycleNodes
 from rclpy.duration import Duration
 from rclpy.node import Node
@@ -26,7 +24,6 @@ class OdomReadyActivator(Node):
         self.declare_parameter(
             'fallback_lifecycle_service', '/manage_nodes'
         )
-        self.declare_parameter('controller_get_state_service', '/controller_server/get_state')
         self.declare_parameter('retry_cooldown_sec', 3.0)
 
         self._target_frame = str(self.get_parameter('target_frame').value)
@@ -39,9 +36,6 @@ class OdomReadyActivator(Node):
         fallback_lifecycle_service = str(
             self.get_parameter('fallback_lifecycle_service').value
         )
-        controller_get_state_service = str(
-            self.get_parameter('controller_get_state_service').value
-        )
         self._retry_cooldown_sec = float(self.get_parameter('retry_cooldown_sec').value)
 
         self._tf_buffer = Buffer()
@@ -51,9 +45,6 @@ class OdomReadyActivator(Node):
             ManageLifecycleNodes, fallback_lifecycle_service
         )
         self._active_client: Optional[rclpy.client.Client] = None
-        self._controller_state_client = self.create_client(
-            GetState, controller_get_state_service
-        )
 
         self._request_sent = False
         self._startup_completed = False
@@ -80,7 +71,10 @@ class OdomReadyActivator(Node):
         return False
 
     def _tick(self) -> None:
-        if self._startup_completed or self._request_sent:
+        if self._startup_completed:
+            return
+
+        if self._request_sent:
             return
 
         now = self.get_clock().now()
@@ -99,7 +93,7 @@ class OdomReadyActivator(Node):
         if self._active_client is None:
             return
 
-        if not self._active_client.service_is_ready() or not self._controller_state_client.wait_for_service(timeout_sec=0.0):
+        if not self._active_client.service_is_ready():
             return
 
         try:
@@ -110,12 +104,6 @@ class OdomReadyActivator(Node):
                 timeout=Duration(seconds=self._transform_timeout),
             )
         except TransformException:
-            return
-
-        # If controller is already ACTIVE, avoid repeating STARTUP and creating lifecycle loops.
-        if self._controller_is_active():
-            self.get_logger().info('controller_server already ACTIVE, skip STARTUP retry.')
-            self._startup_completed = True
             return
 
         req = ManageLifecycleNodes.Request()
@@ -132,18 +120,6 @@ class OdomReadyActivator(Node):
         future = self._active_client.call_async(req)
         future.add_done_callback(self._on_startup_result)
         self._request_sent = True
-
-    def _controller_is_active(self) -> bool:
-        req = GetState.Request()
-        future = self._controller_state_client.call_async(req)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=0.5)
-        if not future.done():
-            return False
-        try:
-            res = future.result()
-        except Exception:
-            return False
-        return res is not None and res.current_state.id == State.PRIMARY_STATE_ACTIVE
 
     def _on_startup_result(self, future) -> None:
         try:
@@ -166,18 +142,11 @@ class OdomReadyActivator(Node):
                 )
             else:
                 self.get_logger().info('Nav2 startup request accepted.')
+                self.get_logger().info(
+                    'Lifecycle manager accepted STARTUP. Wait for "Managed nodes are active"; '
+                    'then preset_waypoint_mission should send the first waypoint.'
+                )
                 self._startup_completed = True
-            return
-
-        if self._controller_is_active():
-            self.get_logger().warn(
-                'STARTUP failed while controller_server is ACTIVE. Scheduling RESET then retry.'
-            )
-            self._need_reset_before_startup = True
-            self._request_sent = False
-            self._next_retry_time = self.get_clock().now() + Duration(
-                seconds=self._retry_cooldown_sec
-            )
             return
 
         self.get_logger().error('Nav2 startup request failed, will retry after cooldown.')

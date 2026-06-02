@@ -313,10 +313,11 @@ def generate_launch_description():
         parameters=[
             {'invert_linear_x': LaunchConfiguration('cmd_invert_linear_x')},
             {'invert_angular_z': LaunchConfiguration('cmd_invert_angular_z')},
-            {'min_nonzero_angular_z': 0.06},                    # 比死区略大，防止末端wz太小不动
+            {'min_nonzero_linear_x': 0.06},                     # 低于 0.06m/s 四足实际不迈步
+            {'min_nonzero_angular_z': 0.04},                    # 原地对准只做慢速微调
             {'min_nonzero_angular_linear_x_threshold': 0.03},   # 仅原地对齐阶段启用最小角速度
-            {'max_angular_z': 0.24},        # 小幅放宽导航角速度限幅
-            {'max_angular_z_accel': 0.35},  # 小幅放宽导航角加速度限幅
+            {'max_angular_z': 0.14},        # 降低原地对准速度
+            {'max_angular_z_accel': 0.20},  # 降低对准加速度
         ]
     )
 

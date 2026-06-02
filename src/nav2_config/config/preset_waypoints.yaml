@@ -11,6 +11,7 @@
 # role 简写：
 # - observe：导航到观察位，到点后启动 YOLO。
 # - pick_auto_place：导航到抓取位，机械臂 pick 后自动插入去对应 class 放置区的路线。
+#   默认动态路线：先回到 y=0 主通道，再沿 y=0 直接到 transfer_x，最后去对应 class 放置区。
 # - pick：只抓取，不自动插入放置路线；后面可以手写 carry/place/return 点。
 # - carry：带箱普通途径点。
 # - place：机械臂 place；place.target=auto 时使用最近一次 YOLO class 对应放置区坐标。
@@ -27,29 +28,29 @@ yolo:
 
 place_targets:
   class_0:
-    x: 5.10
-    y: 1.20
+    x: 5.0
+    y: 1.10
     yaw_deg: 0.0
     aliases: ['class0', '0', 'food', '食品']
   class_1:
-    x: 5.10
+    x: 5.0
     y: 0.40
     yaw_deg: 0.0
     aliases: ['class1', '1', 'tool', '工具']
   class_2:
-    x: 5.10
+    x: 5.0
     y: -0.40
     yaw_deg: 0.0
     aliases: ['class2', '2', 'instrument', '仪器']
   class_3:
-    x: 5.10
+    x: 5.0
     y: -1.20
     yaw_deg: 0.0
     aliases: ['class3', '3', 'medicine', '药品']
 
 waypoints:
-  - {name: OBSERVE_01, role: observe, x: 1.275, y: 1.20, yaw_deg: 0.0}
-  - {name: PICK_01, role: pick_auto_place, x: 1.275, y: 1.45, yaw_deg: 0.0, transfer_x: 4.60, side_aisle_y: 1.55, return_to_next_pick: true}
+  - {name: OBSERVE_01, role: observe, x: 1.00, y: 0.375, yaw_deg: 0.0}
+  - {name: PICK_01, role: pick_auto_place, x: 1.6, y: 0.375, yaw_deg: 0.0, transfer_x: 4.60, centerline_y: 0.0, side_aisle_y: 1.55, return_to_next_pick: true}
 
   # - {name: OBSERVE_02, role: observe, x: 1.20, y: 0.425, yaw_deg: 0.0}
   # - {name: PICK_02, role: pick_auto_place, x: 1.45, y: 0.425, yaw_deg: 0.0, transfer_x: 4.60, side_aisle_y: 1.55, return_to_next_pick: true}

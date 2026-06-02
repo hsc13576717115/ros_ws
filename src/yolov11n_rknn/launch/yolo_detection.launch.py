@@ -100,6 +100,18 @@ def generate_launch_description():
         description='Whether to start YOLO inference immediately'
     )
 
+    target_fps_arg = DeclareLaunchArgument(
+        'target_fps',
+        default_value='30',
+        description='Camera and detection loop target FPS'
+    )
+
+    performance_log_enabled_arg = DeclareLaunchArgument(
+        'performance_log_enabled',
+        default_value='false',
+        description='Print YOLO FPS and timing logs every second'
+    )
+
     enable_topic_arg = DeclareLaunchArgument(
         'enable_topic',
         default_value='/yolo/enable',
@@ -126,6 +138,8 @@ def generate_launch_description():
             'publish_image': LaunchConfiguration('publish_image'),
             'camera_id': LaunchConfiguration('camera_id'),
             'start_enabled': LaunchConfiguration('start_enabled'),
+            'target_fps': LaunchConfiguration('target_fps'),
+            'performance_log_enabled': LaunchConfiguration('performance_log_enabled'),
             'enable_topic': LaunchConfiguration('enable_topic'),
         }]
     )
@@ -146,6 +160,8 @@ def generate_launch_description():
         publish_image_arg,
         camera_id_arg,
         start_enabled_arg,
+        target_fps_arg,
+        performance_log_enabled_arg,
         enable_topic_arg,
         # 节点
         yolo_detection_node,

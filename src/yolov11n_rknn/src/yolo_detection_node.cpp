@@ -28,8 +28,12 @@
 #include "yolov11n_rknn/yolo_detector.hpp"
 #include "ament_index_cpp/get_package_share_directory.hpp"
 #include <opencv2/opencv.hpp>
+#include <algorithm>
 #include <functional>
+#include <iomanip>
+#include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <chrono>
 
@@ -66,8 +70,10 @@ public:
         declare_parameter("class_names", std::vector<std::string>{"class_0", "class_1", "class_2", "class_3"});
         declare_parameter("input_width", 640);
         declare_parameter("input_height", 480);
+        declare_parameter("target_fps", 30);
         declare_parameter("start_enabled", true);
         declare_parameter("enable_topic", std::string("/yolo/enable"));
+        declare_parameter("performance_log_enabled", false);
 
         // 获取参数
         auto config = get_config_from_params();
@@ -102,7 +108,7 @@ public:
 
         // 创建检测定时器
         const auto& detector_config = detector_->get_config();
-        int period_ms = 1000 / detector_config.target_fps;
+        int period_ms = std::max(1, 1000 / detector_config.target_fps);
         timer_ = create_wall_timer(
             std::chrono::milliseconds(period_ms),
             [this] { detect_callback(); }
@@ -111,6 +117,7 @@ public:
         // 初始化FPS统计
         frame_count_ = 0;
         last_fps_time_ = now();
+        last_detection_log_time_ = now();
         current_fps_ = 0;
 
         // 打印配置信息
@@ -150,6 +157,8 @@ private:
         // 设置输入尺寸（从参数读取，默认 640x480）
         config.input_width = get_parameter("input_width").as_int();
         config.input_height = get_parameter("input_height").as_int();
+        config.target_fps = get_parameter("target_fps").as_int();
+        performance_log_enabled_ = get_parameter("performance_log_enabled").as_bool();
 
         return config;
     }
@@ -165,11 +174,11 @@ private:
             return false;
         }
 
-        // 配置摄像头参数 (使用640x480原生分辨率，最高120fps)
+        // 配置摄像头参数 (使用640x480原生分辨率，按检测频率采集)
         cap_.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
         cap_.set(cv::CAP_PROP_FRAME_WIDTH, 640);
         cap_.set(cv::CAP_PROP_FRAME_HEIGHT, 480);
-        cap_.set(cv::CAP_PROP_FPS, 120);
+        cap_.set(cv::CAP_PROP_FPS, detector_->get_config().target_fps);
 
         // 验证配置
         int actual_width = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_WIDTH));
@@ -192,12 +201,14 @@ private:
         RCLCPP_INFO(get_logger(), "Model path: %s", config.model_path.c_str());
         RCLCPP_INFO(get_logger(), "Number of classes: %d", config.num_classes);
         RCLCPP_INFO(get_logger(), "Input resolution: %dx%d", config.input_width, config.input_height);
+        RCLCPP_INFO(get_logger(), "Target FPS: %d", config.target_fps);
         RCLCPP_INFO(get_logger(), "Confidence threshold: %.2f", config.conf_threshold);
         RCLCPP_INFO(get_logger(), "NMS threshold: %.2f", config.nms_threshold);
         RCLCPP_INFO(get_logger(), "Show detection: %s", show_detection_ ? "YES" : "NO");
         RCLCPP_INFO(get_logger(), "Publish image: %s", publish_image_ ? "YES" : "NO");
         RCLCPP_INFO(get_logger(), "Start enabled: %s", detection_enabled_ ? "YES" : "NO");
         RCLCPP_INFO(get_logger(), "Enable topic: %s", enable_topic_.c_str());
+        RCLCPP_INFO(get_logger(), "Performance log: %s", performance_log_enabled_ ? "YES" : "NO");
         RCLCPP_INFO(get_logger(), "=====================================");
 
         // 打印无显示模式提示
@@ -229,6 +240,7 @@ private:
         std::vector<DetectBox> detections;
         if (detection_enabled_) {
             detections = detector_->detect(frame);
+            log_detection_classes(detections);
         }
         last_detection_count_ = detections.size();
 
@@ -258,7 +270,10 @@ private:
             frame_count_ = 0;
             last_fps_time_ = current_time;
 
-            // 如果没有显示窗口，在终端输出性能信息
+            if (!performance_log_enabled_) {
+                return;
+            }
+
             if (!show_detection_ && detection_enabled_) {
                 float capture_time = last_capture_time_ms_;
                 float preprocess_time = detector_->get_last_preprocess_time_ms();
@@ -295,9 +310,44 @@ private:
      */
     void print_headless_mode_info() {
         if (!show_detection_ && !headless_info_printed_) {
-            RCLCPP_INFO(get_logger(), "Running in headless mode (no display). Performance stats will be printed every second...");
+            RCLCPP_INFO(get_logger(), "Running in headless mode (no display).");
             headless_info_printed_ = true;
         }
+    }
+
+    void log_detection_classes(const std::vector<DetectBox>& detections) {
+        if (detections.empty()) {
+            return;
+        }
+
+        auto current_time = now();
+        if ((current_time - last_detection_log_time_).seconds() < 1.0) {
+            return;
+        }
+        last_detection_log_time_ = current_time;
+
+        const auto& config = detector_->get_config();
+        std::map<std::string, std::pair<int, float>> summary;
+        for (const auto& det : detections) {
+            std::string class_name = (det.class_id < static_cast<int>(config.class_names.size()))
+                                     ? config.class_names[det.class_id]
+                                     : "class_" + std::to_string(det.class_id);
+            auto& item = summary[class_name];
+            item.first += 1;
+            item.second = std::max(item.second, det.score);
+        }
+
+        std::ostringstream text;
+        bool first = true;
+        for (const auto& item : summary) {
+            if (!first) {
+                text << ", ";
+            }
+            first = false;
+            text << item.first << "@" << std::fixed << std::setprecision(2)
+                 << item.second.second << " x" << item.second.first;
+        }
+        RCLCPP_INFO(get_logger(), "Detected: %s", text.str().c_str());
     }
 
     /**
@@ -447,12 +497,14 @@ private:
     bool show_detection_;
     bool publish_image_;
     bool detection_enabled_;
+    bool performance_log_enabled_;
     int camera_id_;
     std::string enable_topic_;
 
     // FPS统计
     int frame_count_;
     rclcpp::Time last_fps_time_;
+    rclcpp::Time last_detection_log_time_;
     int current_fps_;
 
     // 显示降频计数器

@@ -136,7 +136,7 @@ def generate_launch_description():
 
     yolo_publish_image_arg = DeclareLaunchArgument(
         'yolo_publish_image',
-        default_value='true',
+        default_value='false',
         description='Publish YOLO image topic for RViz'
     )
 
@@ -162,6 +162,24 @@ def generate_launch_description():
         'preset_mission_loop',
         default_value='false',
         description='Loop preset mission after the last waypoint'
+    )
+
+    arm_start_settle_arg = DeclareLaunchArgument(
+        'arm_start_settle_sec',
+        default_value='1.0',
+        description='Seconds to lock and stop the base before starting an arm waypoint task'
+    )
+
+    verify_reached_pose_arg = DeclareLaunchArgument(
+        'verify_reached_pose',
+        default_value='true',
+        description='Verify map->base_link pose after Nav2 success before running waypoint side effects'
+    )
+
+    reached_xy_tolerance_arg = DeclareLaunchArgument(
+        'reached_xy_tolerance',
+        default_value='0.25',
+        description='Maximum map-frame XY distance allowed after Nav2 reports waypoint success'
     )
 
     params_file = os.path.join(nav2_config_dir, 'config', 'nav2_slam_params.yaml')
@@ -307,7 +325,7 @@ def generate_launch_description():
             {'use_sim_time': LaunchConfiguration('use_sim_time')}
         ],
         remappings=[('cmd_vel', 'cmd_vel_nav')],
-        arguments=['--ros-args', '--log-level', 'info']  # 保留 info 以显示导航状态
+        arguments=['--ros-args', '--log-level', 'warn']
     )
 
     # ============================================================================
@@ -395,7 +413,7 @@ def generate_launch_description():
         remappings=[
             ('odom', '/odom'),  # 使用 Cartographer 发布的 odom
         ],
-        arguments=['--ros-args', '--log-level', 'info']  # 保留导航状态信息
+        arguments=['--ros-args', '--log-level', 'warn']
     )
 
     # ============================================================================
@@ -447,18 +465,23 @@ def generate_launch_description():
             {'plan_topic': '/plan'},
             {'global_plan_topic': '/global_plan'},
             {'status_topic': '/cmd_vel_to_move_cmd/status'},
+            {'linear_only_topic': '/base_motion/linear_only'},
             {'base_frame': 'base_link'},
-            {'final_align_enabled': True},   # 启用 bridge final_align 比例控制终点朝向对齐
+            {'cmd_vel_timeout_sec': 0.20},  # 目标附近不要长时间保持上一条速度，避免越过目标还继续发
+            {'goal_stop_guard_enabled': True},
+            {'goal_stop_xy_tolerance': 0.10},
+            {'final_align_enabled': False},  # 关闭 bridge 终点原地对齐，避免四足在目标点反复原地旋转
+            {'min_nonzero_linear_x': 0.06},  # 低于 0.06m/s 四足实际不迈步，抬高非零前进命令
             {'final_align_xy_trigger': 0.08},
             {'final_align_yaw_trigger': 0.35},                  # 更早进入 final_align，给更多调整时间
             {'final_align_yaw_exit': 0.04},                     # 约 2.3° 才退出，提高最终朝向精度
             {'final_align_linear_scale': 0.15},
             {'final_align_max_linear_x': 0.0},                  # 完全原地旋转，不再前进
             {'final_align_angular_kp': 0.8},                    # 降低比例增益，减少高速旋转过冲
-            {'min_nonzero_angular_z': 0.08},                    # 增大最小角速度，确保步态能有效响应不原地踏步
+            {'min_nonzero_angular_z': 0.04},                    # 原地对准只做慢速微调
             {'min_nonzero_angular_linear_x_threshold': 0.02},   # 更早允许纯转向阶段触发最小角速度
-            {'max_angular_z': 0.24},        # 与 velocity_smoother 对齐
-            {'max_angular_z_accel': 0.35},  # 与 velocity_smoother 对齐，避免链路前后限幅打架
+            {'max_angular_z': 0.14},        # 与 velocity_smoother 对齐，降低原地对准速度
+            {'max_angular_z_accel': 0.20},  # 与 velocity_smoother 对齐，降低对准加速度
             {'smoothing_alpha': 0.30},      # 降低平滑，减少 final_align 阶段的指令迟滞
             {'max_step_x_rate': 2.4},       # 适度提高转向步态指令响应
             {'max_step_y_rate': 2.0},       # 适度提高直行步态指令响应
@@ -488,6 +511,14 @@ def generate_launch_description():
             {'frame_id': 'map'},
             {'publish_field_layout': LaunchConfiguration('start_field_reference')},
             {'publish_task_item_zones': LaunchConfiguration('show_task_item_zones')},
+            {'arm_start_settle_sec': LaunchConfiguration('arm_start_settle_sec')},
+            {'verify_reached_pose': LaunchConfiguration('verify_reached_pose')},
+            {'reached_xy_tolerance': LaunchConfiguration('reached_xy_tolerance')},
+            {'base_motion_linear_only_topic': '/base_motion/linear_only'},
+            {'linear_only_x_tolerance': 0.15},
+            {'same_position_spin_enabled': True},
+            {'same_position_tolerance': 0.05},
+            {'same_yaw_tolerance_deg': 5.0},
         ]
     )
 
@@ -528,6 +559,9 @@ def generate_launch_description():
         yolo_camera_id_arg,
         waypoint_file_arg,
         preset_mission_loop_arg,
+        arm_start_settle_arg,
+        verify_reached_pose_arg,
+        reached_xy_tolerance_arg,
         tf_static,
         lidar_driver,
         yesense_launch,

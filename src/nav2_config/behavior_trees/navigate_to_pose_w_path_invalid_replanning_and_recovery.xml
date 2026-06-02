@@ -1,23 +1,17 @@
 <!--
-  Replan only when the goal changes or the current global path becomes invalid.
-  This avoids recomputing a new goal-heading-satisfying path while the robot is
-  already inside the goal area and only needs final heading alignment.
+  Recompute the global path for each NavigateToPose tick.
+
+  The previous path can remain valid after a waypoint succeeds. Reusing it for
+  the next action goal lets FollowPath immediately succeed against the stale
+  endpoint, so preset missions may skip a later waypoint while still far away.
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
     <RecoveryNode number_of_retries="6" name="NavigateRecovery">
-      <PipelineSequence name="NavigateWithPathValidityReplanning">
-        <RateController hz="1.0" name="RateControllerComputePathToPose">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="0.5" name="RateControllerComputePathToPose">
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
-            <Fallback name="ReusePathUnlessGoalChangedOrInvalid">
-              <ReactiveSequence name="CheckIfCurrentPathIsStillUsable">
-                <Inverter>
-                  <GoalUpdated/>
-                </Inverter>
-                <IsPathValid path="{path}"/>
-              </ReactiveSequence>
-              <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
-            </Fallback>
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
             <ClearEntireCostmap
               name="ClearGlobalCostmap-Context"
               service_name="global_costmap/clear_entirely_global_costmap"/>
