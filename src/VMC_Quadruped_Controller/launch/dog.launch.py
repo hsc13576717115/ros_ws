@@ -57,6 +57,11 @@ def generate_launch_description():
             'imu_pitch_sign',
             default_value='1.0',
         ),
+        DeclareLaunchArgument(
+            'dpad_down_jump',
+            default_value='false',
+            description='Use D-pad down as medium jump (only when start_dpad_gpio is false)',
+        ),
         Node(
             package='joy',
             executable='joy_node',
@@ -79,6 +84,7 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'imu_pitch_sign': LaunchConfiguration('imu_pitch_sign'),
+                'dpad_down_jump': LaunchConfiguration('dpad_down_jump'),
             }],
             condition=IfCondition(LaunchConfiguration('start_body')),
         ),

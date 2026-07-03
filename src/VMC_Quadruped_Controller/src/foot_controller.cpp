@@ -44,11 +44,14 @@ class Foot_Controller : public rclcpp::Node{
         bool manual_pause_latched = false;
         bool prev_stand_btn = false;
         bool prev_sit_btn = false;
+        bool prev_use_imu_btn = false;
+        bool prev_dpad_down = false;
         std::chrono::steady_clock::time_point last_joy_motion_time;
         std::chrono::steady_clock::time_point last_auto_cmd_time;
         std::chrono::steady_clock::time_point last_arm_control_time;
         bool use_imu_pitch = false;
         double imu_pitch_sign = 1.0;
+        bool dpad_down_jump = false;
         double arm_stick_x = 0.0;
         double arm_stick_z = 0.0;
         double arm_target_x = 0.30;
@@ -78,6 +81,8 @@ class Foot_Controller : public rclcpp::Node{
     public: Foot_Controller(): Node("foot_controller"){
         this->declare_parameter<double>("imu_pitch_sign", 1.0);
         this->get_parameter("imu_pitch_sign", imu_pitch_sign);
+        this->declare_parameter<bool>("dpad_down_jump", false);
+        this->get_parameter("dpad_down_jump", dpad_down_jump);
         joy_subscription = this->create_subscription<sensor_msgs::msg::Joy>("joy",10,std::bind(&Foot_Controller::joy_callback,this,std::placeholders::_1));
         move_cmd_subscription = this->create_subscription<vmc_quadruped_controller::msg::MoveCmd>("move_cmd",10,std::bind(&Foot_Controller::move_cmd_callback,this,std::placeholders::_1));
         euler_subscription = this->create_subscription<yesense_interface::msg::EulerOnly>("euler_only",10,std::bind(&Foot_Controller::euler_callback,this,std::placeholders::_1));
@@ -106,8 +111,8 @@ class Foot_Controller : public rclcpp::Node{
             params[i].ki_y = INIT_KI_Y;
             params[i].kd_y = INIT_KD_Y;
         }
-        // params[3].kp_y = INIT_KP_Y_LEG3; // 3号腿输出力矩不足，软件解决
-        // params[2].kp_y = INIT_KP_Y_LEG2; // 2号腿输出力矩不足，软件解决
+        params[3].kp_y = INIT_KP_Y_LEG3; // 3号腿输出力矩不足，软件解决
+        params[2].kp_y = INIT_KP_Y_LEG2; // 2号腿输出力矩不足，软件解决
         //     params[2].kd_y = INIT_KD_Y_LEG2; // 2号腿输出力矩不足，软件解决
         //     params[3].kd_y = INIT_KD_Y_LEG3; // 2号腿输出力矩不足，软件解决
             last_joy_motion_time = std::chrono::steady_clock::time_point::min();
@@ -264,7 +269,9 @@ class Foot_Controller : public rclcpp::Node{
         float recvd_pitch = static_cast<float>(imu_pitch_sign * msg->euler.pitch / 180.0 * M_PI);
         imu_pitch = imu_pitch + (recvd_pitch - imu_pitch) * IMU_PITCH_KD;
         imu_yaw = msg->euler.yaw;
-        // RCLCPP_INFO(this->get_logger(),"imu_pitch:%.3f",imu_pitch);
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+            "IMU raw pitch=%.2f deg, filtered imu_pitch=%.4f rad (%.2f deg), use_imu_pitch=%d",
+            msg->euler.pitch, imu_pitch, imu_pitch * 180.0 / M_PI, use_imu_pitch);
     }
     private: void move_cmd_callback(const vmc_quadruped_controller::msg::MoveCmd::SharedPtr msg){
         last_auto_cmd_time = std::chrono::steady_clock::now();
@@ -279,19 +286,19 @@ class Foot_Controller : public rclcpp::Node{
         arm_stick_z = msg->axes[AXES_RY];
         // // 打印轴和按钮状态
         // RCLCPP_INFO(this->get_logger(), "收到Joy消息:");
-        
+
         // // 打印所有轴
         // RCLCPP_INFO(this->get_logger(), "轴:");
         // for (size_t i = 0; i < msg->axes.size(); ++i) {
         // RCLCPP_INFO(this->get_logger(), "  轴[%zu]: %.2f", i, msg->axes[i]);
         // }
-        
+
         // // 打印所有按钮
         // RCLCPP_INFO(this->get_logger(), "按钮:");
         // for (size_t i = 0; i < msg->buttons.size(); ++i) {
         // RCLCPP_INFO(this->get_logger(), "  按钮[%zu]: %d", i, msg->buttons[i]);
         // }
-        
+
         bool stand_btn = msg->buttons[STAND_UP_BTN];
         bool sit_btn = msg->buttons[SIT_DOWN_BTN];
 
@@ -316,13 +323,15 @@ class Foot_Controller : public rclcpp::Node{
 
         prev_stand_btn = stand_btn;
         prev_sit_btn = sit_btn;
-        if(msg->buttons[USE_IMU_PITCH_BTN]){
+        bool use_imu_btn = msg->buttons[USE_IMU_PITCH_BTN];
+        if(use_imu_btn && !prev_use_imu_btn){
             use_imu_pitch = !use_imu_pitch;
             if(use_imu_pitch)
-                RCLCPP_DEBUG(get_logger(),"enable imu pitch");
+                RCLCPP_INFO(get_logger(),"enable imu pitch");
             else
-                RCLCPP_DEBUG(get_logger(),"disable imu pitch");
+                RCLCPP_INFO(get_logger(),"disable imu pitch");
         }
+        prev_use_imu_btn = use_imu_btn;
         if(msg->buttons[NORMAL_GAIT_BTN]){
             BODY_HEIGHT = NORMAL_GAIT_BODY_HEIGHT;
             cycloid.Height = NORMAL_GAIT_HEIGHT;
@@ -412,6 +421,14 @@ class Foot_Controller : public rclcpp::Node{
                 // leg_pos[i][1] = BODY_HEIGHT;
             }
         }
+        // 十字下键：未启动机械臂 GPIO 节点时作为中跳，否则留给机械臂 GPIO
+        if(dpad_down_jump){
+            bool dpad_down = msg->axes[7] < -0.5;
+            if(dpad_down && !prev_dpad_down && stand_up_flag && !running && !runner_exists){
+                jump_medium();
+            }
+            prev_dpad_down = dpad_down;
+        }
         if(msg->buttons[FAST_BIN]){
             period = FAST_GAIT_PERIOD;           // 更快步频
             step_length = FAST_GAIT_STEP_LENGTH;      // 更小步长
@@ -421,6 +438,65 @@ class Foot_Controller : public rclcpp::Node{
             period = BIG_FAST_GAIT_PERIOD;           // 更快步频
             step_length = BIG_GAIT_STEP_LENGTH;      // 更小步长
         }
+    }
+
+    private: void jump_medium(){
+        RCLCPP_DEBUG(this->get_logger(),"start medium jump");
+        // ready for jump
+        for(int i=0;i<4;i++){
+            leg_pos[i][0] = -0.045;
+            leg_pos[i][1] = 0.15;
+        }
+        float jump_x = -0.12;
+        float jump_height = BODY_HEIGHT + 0.05;
+        // jump
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        params[0].kp_y = 6000;
+        params[0].kd_y = 50;
+        params[0].kp_x = 4000;
+        params[0].kd_x = 70;
+        leg_pos[0][0] = jump_x;
+        leg_pos[0][1] = jump_height;
+
+        params[1].kp_y = 5500;
+        params[1].kd_y = 50;
+        params[1].kp_x = 4000;
+        params[1].kd_x = 70;
+        leg_pos[1][0] = jump_x;
+        leg_pos[1][1] = jump_height;
+
+        params[2].kp_y = 5800;
+        params[2].kd_y = 55;
+        params[2].kp_x = 4000;
+        params[2].kd_x = 70;
+        leg_pos[2][0] = jump_x;
+        leg_pos[2][1] = jump_height;
+
+        params[3].kp_y = 7200;
+        params[3].kd_y = 55;
+        params[3].kp_x = 4000;
+        params[3].kd_x = 70;
+        leg_pos[3][0] = jump_x;
+        leg_pos[3][1] = jump_height;
+        // fall down
+        std::this_thread::sleep_for(std::chrono::milliseconds(230));
+        for(int i=0;i<4;i++){
+            params[i].kp_y = 800;
+            params[i].kd_y = 40;
+            params[i].kp_x = 800;
+            params[i].kd_x = 40;
+            params[i].kp_x = INIT_KP_X;
+            leg_pos[i][0] = 0;
+        }
+        // release
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+        for(int i=0;i<4;i++){
+            params[i].kp_y = INIT_KP_Y;
+            params[i].kd_y = INIT_KD_Y;
+            params[i].kp_x = INIT_KP_X;
+            params[i].kd_x = INIT_KD_X;
+        }
+        RCLCPP_DEBUG(this->get_logger(),"end medium jump");
     }
 
     private: void jump_high(){
@@ -464,7 +540,7 @@ class Foot_Controller : public rclcpp::Node{
         // fall down
         std::this_thread::sleep_for(std::chrono::milliseconds(170));
         for(int i=0;i<4;i++){
-            
+
             params[i].kp_y = 500;
             params[i].kd_y = 40;
             params[i].kp_x = 500;
@@ -475,7 +551,7 @@ class Foot_Controller : public rclcpp::Node{
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         for(int i=0;i<4;i++){
-            
+
             params[i].kp_y = 500;
             params[i].kd_y = 40;
             params[i].kp_x = 500;
@@ -664,7 +740,7 @@ class Foot_Controller : public rclcpp::Node{
             leg_pos[1][0] = res.x;
             leg_pos[1][1] = res.y + leg_offset_y[1];
             // leg_pos[1][1] = res.y;
-            
+
             // for(int i=0;i<4;i++){
             //     RCLCPP_INFO(this->get_logger(),"leg[%d] x:%.3f y:%.3f",i,leg_pos[i][0],leg_pos[i][1]);
             // }

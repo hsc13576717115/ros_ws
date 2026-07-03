@@ -13,9 +13,9 @@
 #include "vmc_quadruped_controller/msg/move_cmd.hpp"
 #include "yesense_interface/msg/euler_only.hpp"
 #include "cycloid.h"
-#define _USE_MATH_DEFINES 
-#define STAND_UP_ANGLE_1 72
-#define STAND_UP_ANGLE_2 63
+#define _USE_MATH_DEFINES
+#define STAND_UP_ANGLE_1 66
+#define STAND_UP_ANGLE_2 49
 #define OUTER_MOTOR_OFFEST -(STAND_UP_ANGLE_1+STAND_UP_ANGLE_2)/180.0*M_PI
 #define INNER_MOTOR_OFFEST M_PI-(STAND_UP_ANGLE_1-STAND_UP_ANGLE_2)/180.0*M_PI
 #define INIT_BODY_HEIGHT 0.223
