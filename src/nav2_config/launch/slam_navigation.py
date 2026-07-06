@@ -462,7 +462,7 @@ def generate_launch_description():
         name='wait_for_odom_activate_nav2',
         output='screen',
         parameters=[
-            {'target_frame': 'odom'},
+            {'target_frame': 'map'},
             {'source_frame': 'base_link'},
             {'lifecycle_service': '/lifecycle_manager_navigation/manage_nodes'},
         ]

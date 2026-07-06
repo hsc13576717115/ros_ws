@@ -856,7 +856,7 @@ class PresetWaypointMission(Node):
     @staticmethod
     def _back_pick_params(side: str) -> tuple[float, float, float, float]:
         if side == 'left':
-            return 4.70, 3.70, 1.275, math.pi * 0.5
+            return 4.70, 3.70, 1.125, math.pi * 0.5
         return 4.70, 3.70, -1.275, -math.pi * 0.5
 
     @staticmethod
@@ -870,6 +870,10 @@ class PresetWaypointMission(Node):
         if side == 'left':
             return target.y > 0.75
         return target.y < -0.75
+
+    @staticmethod
+    def _is_leftmost_place_target(target: PlaceTarget) -> bool:
+        return target.y > 0.75
 
     def _retarget_next_back_pick_waypoints(self, start_index: int, side: str) -> None:
         observe_x, pick_x, pick_y, _side_yaw = self._back_pick_params(side)
@@ -1258,9 +1262,14 @@ class PresetWaypointMission(Node):
 
         if wp.place.return_to_next_pick and next_wp is not None:
             backoff_distance_m = 0.20
+            post_place_y_offset_m = -0.15
             backoff_x = target.x - math.cos(target.yaw) * backoff_distance_m
-            backoff_y = target.y - math.sin(target.yaw) * backoff_distance_m
-            pickup_side = self._place_side_from_y(target.y)
+            backoff_y = (
+                target.y
+                - math.sin(target.yaw) * backoff_distance_m
+                + post_place_y_offset_m
+            )
+            pickup_side = 'left'
             observe_x, _pick_x, pickup_y, pickup_side_yaw = self._back_pick_params(pickup_side)
             self._retarget_next_back_pick_waypoints(self._index + 1, pickup_side)
             route.append(
@@ -1279,42 +1288,62 @@ class PresetWaypointMission(Node):
                     ),
                 )
             )
-            self._append_spin_waypoint_if_needed(
-                route,
-                f'{wp.name}_TURN_{pickup_side.upper()}_90',
-                backoff_x,
-                backoff_y,
-                pickup_side_yaw,
-                'empty',
-                target.name,
-            )
-            self._append_nav_waypoint_if_distinct(
-                route,
-                f'{wp.name}_GO_{pickup_side.upper()}_LANE',
-                backoff_x,
-                pickup_y,
-                pickup_side_yaw,
-                'empty',
-                target.name,
-            )
-            self._append_nav_waypoint_if_distinct(
-                route,
-                f'{wp.name}_GO_{pickup_side.upper()}_BACK',
-                observe_x,
-                pickup_y,
-                pickup_side_yaw,
-                'empty',
-                target.name,
-            )
-            self._append_spin_waypoint_if_needed(
-                route,
-                f'{wp.name}_TURN_SCAN_{pickup_side.upper()}_BACK',
-                observe_x,
-                pickup_y,
-                math.pi,
-                'empty',
-                target.name,
-            )
+            if self._is_leftmost_place_target(target):
+                self._append_spin_waypoint_if_needed(
+                    route,
+                    f'{wp.name}_TURN_SCAN_LEFT_BACK',
+                    backoff_x,
+                    backoff_y,
+                    math.pi,
+                    'empty',
+                    target.name,
+                )
+                self._append_nav_waypoint_if_distinct(
+                    route,
+                    f'{wp.name}_GO_LEFT_BACK',
+                    observe_x,
+                    pickup_y,
+                    math.pi,
+                    'empty',
+                    target.name,
+                )
+            else:
+                self._append_spin_waypoint_if_needed(
+                    route,
+                    f'{wp.name}_TURN_LEFT_90',
+                    backoff_x,
+                    backoff_y,
+                    pickup_side_yaw,
+                    'empty',
+                    target.name,
+                )
+                self._append_nav_waypoint_if_distinct(
+                    route,
+                    f'{wp.name}_GO_LEFT_LANE',
+                    backoff_x,
+                    pickup_y,
+                    pickup_side_yaw,
+                    'empty',
+                    target.name,
+                )
+                self._append_nav_waypoint_if_distinct(
+                    route,
+                    f'{wp.name}_GO_LEFT_BACK',
+                    observe_x,
+                    pickup_y,
+                    pickup_side_yaw,
+                    'empty',
+                    target.name,
+                )
+                self._append_spin_waypoint_if_needed(
+                    route,
+                    f'{wp.name}_TURN_SCAN_LEFT_BACK',
+                    observe_x,
+                    pickup_y,
+                    math.pi,
+                    'empty',
+                    target.name,
+                )
 
         insert_at = self._index + 1
         self._waypoints[insert_at:insert_at] = route
