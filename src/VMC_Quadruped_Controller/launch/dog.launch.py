@@ -62,6 +62,16 @@ def generate_launch_description():
             default_value='false',
             description='Use D-pad down as medium jump (only when start_dpad_gpio is false)',
         ),
+        DeclareLaunchArgument(
+            'default_fast_gait',
+            default_value='false',
+            description='Start foot controller with the fastest gait period',
+        ),
+        DeclareLaunchArgument(
+            'default_gait',
+            default_value='normal',
+            description='Default gait gear: lower, normal, fast, or fastest',
+        ),
         Node(
             package='joy',
             executable='joy_node',
@@ -85,6 +95,8 @@ def generate_launch_description():
             parameters=[{
                 'imu_pitch_sign': LaunchConfiguration('imu_pitch_sign'),
                 'dpad_down_jump': LaunchConfiguration('dpad_down_jump'),
+                'default_fast_gait': LaunchConfiguration('default_fast_gait'),
+                'default_gait': LaunchConfiguration('default_gait'),
             }],
             condition=IfCondition(LaunchConfiguration('start_body')),
         ),

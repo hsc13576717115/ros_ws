@@ -6,6 +6,7 @@
 
 #include <builtin_interfaces/msg/duration.hpp>
 #include <control_msgs/action/follow_joint_trajectory.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
@@ -192,6 +193,11 @@ public:
     elbow_gravity_comp_gain_ = get_parameter("elbow_gravity_comp_gain").as_double();
     mit_settle_timeout_sec_ =
       std::clamp(get_parameter("mit_settle_timeout_sec").as_double(), 0.10, 3.0);
+    parameter_callback_handle_ = add_on_set_parameters_callback(
+      std::bind(
+        &ArmCommandServerNode::handleParameterUpdate,
+        this,
+        std::placeholders::_1));
 
     state_pub_ = create_publisher<r2_arm_control::msg::ArmMotionState>(state_topic_, 10);
     mit_cmd_pub_ = create_publisher<r2_arm_control::msg::MitJointCommand>(
@@ -356,6 +362,42 @@ private:
     const CartesianPoint & target)
   {
     return {target.x - measured.x, target.z - measured.z};
+  }
+
+  rcl_interfaces::msg::SetParametersResult handleParameterUpdate(
+    const std::vector<rclcpp::Parameter> & parameters)
+  {
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+
+    try {
+      for (const auto & parameter : parameters) {
+        const auto & name = parameter.get_name();
+        if (name == "ee_linear_speed_limit") {
+          ee_linear_speed_limit_ = std::max(0.005, parameter.as_double());
+        } else if (name == "ee_linear_acc_limit") {
+          ee_linear_acc_limit_ = std::max(0.01, parameter.as_double());
+        } else if (name == "kp_joint0") {
+          kp_cmd_[0] = std::max(0.0, parameter.as_double());
+        } else if (name == "kp_joint1") {
+          kp_cmd_[1] = std::max(0.0, parameter.as_double());
+        } else if (name == "kd_joint0") {
+          kd_cmd_[0] = std::max(0.0, parameter.as_double());
+        } else if (name == "kd_joint1") {
+          kd_cmd_[1] = std::max(0.0, parameter.as_double());
+        } else if (name == "joint_velocity_smoothing") {
+          joint_velocity_smoothing_ = std::clamp(parameter.as_double(), 0.0, 0.95);
+        } else if (name == "jacobian_damping") {
+          jacobian_damping_ = std::clamp(parameter.as_double(), 1e-5, 0.20);
+        }
+      }
+    } catch (const rclcpp::ParameterTypeException & exc) {
+      result.successful = false;
+      result.reason = exc.what();
+      return result;
+    }
+
+    return result;
   }
 
   static std::string formatAngleTriplet(
@@ -1475,6 +1517,7 @@ private:
   rclcpp::Publisher<r2_arm_control::msg::ArmMotionState>::SharedPtr state_pub_;
   rclcpp::Publisher<r2_arm_control::msg::MitJointCommand>::SharedPtr mit_cmd_pub_;
   rclcpp::Service<r2_arm_control::srv::MoveToXZ>::SharedPtr move_service_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
   rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr feedback_status_sub_;
   rclcpp_action::Client<FollowJointTrajectory>::SharedPtr trajectory_client_;

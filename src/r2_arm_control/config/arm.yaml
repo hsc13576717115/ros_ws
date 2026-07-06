@@ -131,11 +131,11 @@ trajectory_sample_period_sec: 0.02
 
 # 末端笛卡尔直线轨迹的巡航速度上限，单位 m/s。
 # MIT 原生模式会优先按这个速度让末端接近匀速运动。
-ee_linear_speed_limit: 0.20
+ee_linear_speed_limit: 0.80
 
 # 末端笛卡尔直线轨迹的加速度上限，单位 m/s^2。
 # 值越小，起停越柔和；值越大，更容易快速进入匀速段。
-ee_linear_acc_limit: 0.30
+ee_linear_acc_limit: 1.00
 
 # 关节速度命令平滑系数，范围建议 0~0.8。
 # 越大越平滑，但相位滞后也会更明显。
@@ -304,8 +304,8 @@ auto_chain_delay_sec: 0.2
 # 空闲状态：GPIO36 低电平，回到待机点。
 idle_x: 0.15
 idle_z: 0.30
-idle_ee_linear_speed_limit: 0.10
-idle_ee_linear_acc_limit: 0.25
+idle_ee_linear_speed_limit: 0.80
+idle_ee_linear_acc_limit: 1.00
 idle_kp_joint0: 60.0
 idle_kp_joint1: 60.0
 idle_kd_joint0: 2.0
@@ -315,8 +315,8 @@ idle_kd_joint1: 2.0
 auto_enter_idle_on_start: true
 # 启动回 idle 前必须等 /r2/arm/feedback_status 健康，避免控制器未起来时反复下发目标。
 startup_require_feedback_ok: true
-startup_idle_ee_linear_speed_limit: 0.04
-startup_idle_ee_linear_acc_limit: 0.08
+startup_idle_ee_linear_speed_limit: 0.32
+startup_idle_ee_linear_acc_limit: 0.32
 
 # 状态切换安全过渡点：每次进入 idle/pick/store/place 前先经过这里。
 transition_via_x: 0.40
@@ -324,19 +324,19 @@ transition_via_z: 0.30
 
 # 吸取状态：先拉高 GPIO36，再移动到吸取点。
 pick_x: 0.40
-pick_z: -0.08
-pick_ee_linear_speed_limit: 0.10
-pick_ee_linear_acc_limit: 0.25
+pick_z: -0.15
+pick_ee_linear_speed_limit: 0.80
+pick_ee_linear_acc_limit: 1.00
 pick_kp_joint0: 60.0
 pick_kp_joint1: 60.0
 pick_kd_joint0: 2.0
 pick_kd_joint1: 2.0
 
 # 存储状态：保持 GPIO36 高电平，回到存储点。
-store_x: 0.15
-store_z: 0.30
-store_ee_linear_speed_limit: 0.10
-store_ee_linear_acc_limit: 0.25
+store_x: 0.20
+store_z: 0.40
+store_ee_linear_speed_limit: 0.80
+store_ee_linear_acc_limit: 1.00
 store_kp_joint0: 60.0
 store_kp_joint1: 60.0
 store_kd_joint0: 2.0
@@ -345,8 +345,8 @@ store_kd_joint1: 2.0
 # 放置状态：先移动到放置点，到位后再拉低 GPIO36。
 place_x: 0.40
 place_z: -0.08
-place_ee_linear_speed_limit: 0.10
-place_ee_linear_acc_limit: 0.25
+place_ee_linear_speed_limit: 0.80
+place_ee_linear_acc_limit: 1.00
 place_kp_joint0: 60.0
 place_kp_joint1: 60.0
 place_kd_joint0: 2.0

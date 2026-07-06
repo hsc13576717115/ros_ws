@@ -4,6 +4,7 @@
 #include "r2_arm_control/msg/arm_motion_state.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -52,6 +53,8 @@ class Foot_Controller : public rclcpp::Node{
         bool use_imu_pitch = false;
         double imu_pitch_sign = 1.0;
         bool dpad_down_jump = false;
+        bool default_fast_gait = false;
+        std::string default_gait = "normal";
         double arm_stick_x = 0.0;
         double arm_stick_z = 0.0;
         double arm_target_x = 0.30;
@@ -83,6 +86,10 @@ class Foot_Controller : public rclcpp::Node{
         this->get_parameter("imu_pitch_sign", imu_pitch_sign);
         this->declare_parameter<bool>("dpad_down_jump", false);
         this->get_parameter("dpad_down_jump", dpad_down_jump);
+        this->declare_parameter<bool>("default_fast_gait", false);
+        this->get_parameter("default_fast_gait", default_fast_gait);
+        this->declare_parameter<std::string>("default_gait", "normal");
+        this->get_parameter("default_gait", default_gait);
         joy_subscription = this->create_subscription<sensor_msgs::msg::Joy>("joy",10,std::bind(&Foot_Controller::joy_callback,this,std::placeholders::_1));
         move_cmd_subscription = this->create_subscription<vmc_quadruped_controller::msg::MoveCmd>("move_cmd",10,std::bind(&Foot_Controller::move_cmd_callback,this,std::placeholders::_1));
         euler_subscription = this->create_subscription<yesense_interface::msg::EulerOnly>("euler_only",10,std::bind(&Foot_Controller::euler_callback,this,std::placeholders::_1));
@@ -103,6 +110,35 @@ class Foot_Controller : public rclcpp::Node{
         cycloid.Height = NORMAL_GAIT_HEIGHT;
         cycloid.FlightPercent = NORMAL_GAIT_FLIGHT_PERCENT;
         cycloid.BodyHeight = NORMAL_GAIT_BODY_HEIGHT;
+        std::transform(default_gait.begin(), default_gait.end(), default_gait.begin(),
+            [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+        if(default_fast_gait && (default_gait == "normal" || default_gait == "medium")){
+            default_gait = "fastest";
+        }
+        if(default_gait == "lower" || default_gait == "slow"){
+            BODY_HEIGHT = LOWER_GAIT_BODY_HEIGHT;
+            cycloid.Height = LOWER_GAIT_HEIGHT;
+            cycloid.FlightPercent = LOWER_GAIT_FLIGHT_PERCENT;
+            cycloid.BodyHeight = LOWER_GAIT_BODY_HEIGHT;
+            period = LOWER_GAIT_PERIOD;
+            step_length = 0.4;
+            RCLCPP_INFO(this->get_logger(), "default gait=lower: period=%.3f step_length=%.3f", period, step_length);
+        }else if(default_gait == "fast"){
+            period = FAST_GAIT_PERIOD;
+            step_length = FAST_GAIT_STEP_LENGTH;
+            RCLCPP_INFO(this->get_logger(), "default gait=fast: period=%.3f step_length=%.3f", period, step_length);
+        }else if(default_gait == "fastest" || default_gait == "fastfast"){
+            period = FASTFAST_GAIT_PERIOD;
+            step_length = FAST_GAIT_STEP_LENGTH;
+            RCLCPP_INFO(this->get_logger(), "default gait=fastest: period=%.3f step_length=%.3f", period, step_length);
+        }else{
+            if(default_gait != "normal" && default_gait != "medium"){
+                RCLCPP_WARN(this->get_logger(), "unknown default_gait='%s', using normal/medium gait", default_gait.c_str());
+            }
+            period = NORMAL_GAIT_PERIOD;
+            step_length = 0.4;
+            RCLCPP_INFO(this->get_logger(), "default gait=normal: period=%.3f step_length=%.3f", period, step_length);
+        }
         for(int i=0;i<4;i++){
             params[i].kp_x = INIT_KP_X;
             params[i].ki_x = INIT_KI_X;

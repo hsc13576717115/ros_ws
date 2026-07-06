@@ -56,7 +56,6 @@ class CmdVelToMoveCmd(Node):
         self.declare_parameter('plan_topic', '/plan')
         self.declare_parameter('global_plan_topic', '/global_plan')
         self.declare_parameter('motion_lock_topic', '/base_motion/lock')
-        self.declare_parameter('linear_only_topic', '/base_motion/linear_only')
         self.declare_parameter('status_topic', '/cmd_vel_to_move_cmd/status')
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('final_align_enabled', False)
@@ -108,7 +107,6 @@ class CmdVelToMoveCmd(Node):
         self._plan_topic = self.get_parameter('plan_topic').value
         self._global_plan_topic = self.get_parameter('global_plan_topic').value
         self._motion_lock_topic = self.get_parameter('motion_lock_topic').value
-        self._linear_only_topic = self.get_parameter('linear_only_topic').value
         self._status_topic = self.get_parameter('status_topic').value
         self._base_frame = self.get_parameter('base_frame').value
         self._final_align_enabled = bool(
@@ -149,7 +147,6 @@ class CmdVelToMoveCmd(Node):
         self._last_cmd_vel_rx_time: Optional[float] = None
         self._stopped_by_timeout = False
         self._motion_locked = False
-        self._linear_only = False
         self._final_align_active = False
         self._goal_pose: Optional[PoseStamped] = None
         self._goal_pose_rx_time: float = 0.0
@@ -167,7 +164,6 @@ class CmdVelToMoveCmd(Node):
             'angular_z_cmd': 0.0,
             'step_x': 0.0,
             'step_y': 0.0,
-            'linear_only': False,
             'reason': 'startup',
         }
 
@@ -181,9 +177,6 @@ class CmdVelToMoveCmd(Node):
         )
         self._motion_lock_sub = self.create_subscription(
             Bool, self._motion_lock_topic, self._motion_lock_callback, 10
-        )
-        self._linear_only_sub = self.create_subscription(
-            Bool, self._linear_only_topic, self._linear_only_callback, 10
         )
         self._goal_sub = self.create_subscription(
             PoseStamped, self._goal_pose_topic, self._goal_pose_callback, 10
@@ -211,7 +204,6 @@ class CmdVelToMoveCmd(Node):
             f'min_nonzero_angular_linear_x_threshold={self._min_nonzero_angular_linear_x_threshold}, '
             f'cmd_vel_timeout_sec={self._cmd_vel_timeout_sec}, '
             f'motion_lock_topic={self._motion_lock_topic}, '
-            f'linear_only_topic={self._linear_only_topic}, '
             f'final_align_enabled={self._final_align_enabled}'
         )
 
@@ -284,7 +276,6 @@ class CmdVelToMoveCmd(Node):
         self._last_status_pub_sec = now
         self._last_status['step_x'] = round(step_x, 4)
         self._last_status['step_y'] = round(step_y, 4)
-        self._last_status['linear_only'] = bool(self._linear_only)
         msg = String()
         msg.data = json.dumps(self._last_status, ensure_ascii=False)
         self._status_pub.publish(msg)
@@ -458,14 +449,6 @@ class CmdVelToMoveCmd(Node):
         if self._motion_locked:
             self._publish_stop()
 
-    def _linear_only_callback(self, msg: Bool) -> None:
-        enabled = bool(msg.data)
-        if enabled and not self._linear_only:
-            self.get_logger().info('Linear-only segment active; angular /cmd_vel will be suppressed.')
-        elif not enabled and self._linear_only:
-            self.get_logger().info('Linear-only segment cleared.')
-        self._linear_only = enabled
-
     def _watchdog_callback(self) -> None:
         if self._motion_locked:
             self._publish_stop()
@@ -548,8 +531,6 @@ class CmdVelToMoveCmd(Node):
         angular_z = -msg.angular.z if self._invert_angular_z else msg.angular.z
         angular_z = clamp(angular_z, -self._max_angular_z, self._max_angular_z)
         linear_x, angular_z = self._maybe_apply_final_alignment(linear_x, angular_z)
-        if self._linear_only:
-            angular_z = 0.0
         mostly_straight = abs(angular_z) <= self._min_nonzero_angular_linear_x_threshold
         if mostly_straight and 0.0 < abs(linear_x) < self._min_nonzero_linear_x:
             linear_x = self._min_nonzero_linear_x if linear_x > 0.0 else -self._min_nonzero_linear_x

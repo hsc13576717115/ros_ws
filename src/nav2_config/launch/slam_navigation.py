@@ -182,6 +182,24 @@ def generate_launch_description():
         description='Maximum map-frame XY distance allowed after Nav2 reports waypoint success'
     )
 
+    start_runtime_logger_arg = DeclareLaunchArgument(
+        'start_runtime_logger',
+        default_value='false',
+        description='Record run_dog pose, command velocity, move_cmd, goal, and scan summary CSV logs'
+    )
+
+    runtime_log_dir_arg = DeclareLaunchArgument(
+        'runtime_log_dir',
+        default_value='/home/orangepi/run_dog_logs',
+        description='Directory used by run_dog runtime logger'
+    )
+
+    runtime_log_rate_hz_arg = DeclareLaunchArgument(
+        'runtime_log_rate_hz',
+        default_value='10.0',
+        description='CSV sampling rate used by run_dog runtime logger'
+    )
+
     params_file = os.path.join(nav2_config_dir, 'config', 'nav2_slam_params.yaml')
     rviz_config = os.path.join(nav2_config_dir, 'rviz', 'slam_nav.rviz')
     nav_to_pose_bt_xml = os.path.join(
@@ -465,7 +483,6 @@ def generate_launch_description():
             {'plan_topic': '/plan'},
             {'global_plan_topic': '/global_plan'},
             {'status_topic': '/cmd_vel_to_move_cmd/status'},
-            {'linear_only_topic': '/base_motion/linear_only'},
             {'base_frame': 'base_link'},
             {'cmd_vel_timeout_sec': 0.20},  # 目标附近不要长时间保持上一条速度，避免越过目标还继续发
             {'goal_stop_guard_enabled': True},
@@ -480,7 +497,7 @@ def generate_launch_description():
             {'final_align_angular_kp': 0.8},                    # 降低比例增益，减少高速旋转过冲
             {'min_nonzero_angular_z': 0.04},                    # 原地对准只做慢速微调
             {'min_nonzero_angular_linear_x_threshold': 0.02},   # 更早允许纯转向阶段触发最小角速度
-            {'max_angular_z': 0.14},        # 与 velocity_smoother 对齐，降低原地对准速度
+            {'max_angular_z': 0.40},        # 与 velocity_smoother 对齐，限制最大角速度 0.4rad/s
             {'max_angular_z_accel': 0.20},  # 与 velocity_smoother 对齐，降低对准加速度
             {'smoothing_alpha': 0.30},      # 降低平滑，减少 final_align 阶段的指令迟滞
             {'max_step_x_rate': 2.4},       # 适度提高转向步态指令响应
@@ -493,6 +510,28 @@ def generate_launch_description():
         executable='cmd_vel_visualizer.py',
         name='cmd_vel_visualizer',
         output='screen'
+    )
+
+    runtime_logger = Node(
+        package='nav2_config',
+        executable='run_dog_runtime_logger.py',
+        name='run_dog_runtime_logger',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('start_runtime_logger')),
+        parameters=[
+            {'log_root': LaunchConfiguration('runtime_log_dir')},
+            {'sample_rate_hz': LaunchConfiguration('runtime_log_rate_hz')},
+            {'map_frame': 'map'},
+            {'odom_frame': 'odom'},
+            {'base_frame': 'base_link'},
+            {'odom_topic': '/odom'},
+            {'cmd_vel_nav_topic': '/cmd_vel_nav'},
+            {'cmd_vel_topic': '/cmd_vel'},
+            {'move_cmd_topic': '/move_cmd'},
+            {'goal_topic': '/preset_current_goal'},
+            {'scan_topic': '/scan'},
+            {'bridge_status_topic': '/cmd_vel_to_move_cmd/status'},
+        ],
     )
 
     preset_waypoint_mission = Node(
@@ -514,8 +553,6 @@ def generate_launch_description():
             {'arm_start_settle_sec': LaunchConfiguration('arm_start_settle_sec')},
             {'verify_reached_pose': LaunchConfiguration('verify_reached_pose')},
             {'reached_xy_tolerance': LaunchConfiguration('reached_xy_tolerance')},
-            {'base_motion_linear_only_topic': '/base_motion/linear_only'},
-            {'linear_only_x_tolerance': 0.15},
             {'same_position_spin_enabled': True},
             {'same_position_tolerance': 0.05},
             {'same_yaw_tolerance_deg': 5.0},
@@ -562,6 +599,9 @@ def generate_launch_description():
         arm_start_settle_arg,
         verify_reached_pose_arg,
         reached_xy_tolerance_arg,
+        start_runtime_logger_arg,
+        runtime_log_dir_arg,
+        runtime_log_rate_hz_arg,
         tf_static,
         lidar_driver,
         yesense_launch,
@@ -583,6 +623,7 @@ def generate_launch_description():
         nav2_activator,
         cmd_vel_to_move_cmd,
         cmd_vel_visualizer,
+        runtime_logger,
         preset_waypoint_mission,
         rviz_node,
     ])

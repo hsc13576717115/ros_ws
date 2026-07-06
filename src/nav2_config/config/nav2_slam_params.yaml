@@ -25,14 +25,14 @@ controller_server:
       primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"  # 主路径跟踪器
       angular_dist_threshold: 3.14         # 彻底禁用 RotationShim 原地旋转，四足原地转易漂移导致停不下来
       angular_disengage_threshold: 0.35    # 退出阈值保留，实际已不会触发
-      rotate_to_heading_angular_vel: 0.14  # 慢速微调朝向，避免原地对准过快
+      rotate_to_heading_angular_vel: 0.40  # 角速度上限 0.4rad/s；当前 rotate_to_goal_heading=false，仅保留一致配置
       max_angular_accel: 0.20              # 降低角加速度，减少微调过冲
       forward_sampling_distance: 0.30      # 沿路径向前采样距离，用于估算路径方向；不影响 rotate_to_goal_heading
       simulate_ahead_time: 0.6             # 缩短旋转碰撞前瞻时间，避免过度保守
       rotate_to_goal_heading: false        # 关闭 RotationShim 终点原地朝向对齐，改由 bridge final_align 比例控制
       closed_loop: true                    # 用里程计角速度闭环约束旋转过程
 
-      desired_linear_vel: 0.14             # 与 velocity_smoother / 四足步态可执行速度对齐，稳妥完赛优先
+      desired_linear_vel: 0.20             # 运行 run_dog 时默认线速度目标 0.2m/s
       lookahead_dist: 0.45                 # 减小前瞻，提升小空间路径贴合度
       min_lookahead_dist: 0.22             # 最小前瞻距离(m)
       max_lookahead_dist: 0.60             # 最大前瞻距离(m)
@@ -92,8 +92,8 @@ velocity_smoother:
     smoothing_frequency: 12.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.14, 0.0, 0.14]
-    min_velocity: [-0.14, 0.0, -0.14]
+    max_velocity: [0.20, 0.0, 0.40]
+    min_velocity: [-0.20, 0.0, -0.40]
     max_accel: [0.35, 0.0, 0.20]
     max_decel: [-0.45, 0.0, -0.20]
     odom_topic: "/odom"
@@ -114,7 +114,7 @@ behavior_server:
     spin:
       plugin: "nav2_behaviors/Spin"                   # 原地旋转行为
     simulate_ahead_time: 0.5                           # 缩短碰撞前瞻，降低 spin 计算量
-    max_rotational_vel: 0.12                           # 降低 /spin 角速度，减少四足原地转向漂移
+    max_rotational_vel: 0.40                           # /spin 最大角速度限制为 0.4rad/s
     min_rotational_vel: 0.04                           # 保持可执行的最小角速度
     rotational_acc_lim: 0.18                           # 降低 /spin 角加速度，避免起停冲击
     wait:
@@ -189,7 +189,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"   # 障碍膨胀层
         cost_scaling_factor: 2.2                    # 膨胀代价衰减系数，保留更宽安全梯度
-        inflation_radius: 0.30                     # 不小于足迹内切半径，避免贴障误判到达/碰撞风险
+        inflation_radius: 0.01                     # 按比赛场地调窄膨胀半径，减少固定路线保守绕行
 
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"       # 三维体素障碍层（用激光更新）
@@ -252,7 +252,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"   # 膨胀层
         cost_scaling_factor: 2.2                    # 膨胀代价衰减系数，保留更宽安全梯度
-        inflation_radius: 0.30                     # 不小于足迹内切半径，避免贴障误判到达/碰撞风险
+        inflation_radius: 0.01                     # 按比赛场地调窄膨胀半径，减少固定路线保守绕行
 
       always_send_full_costmap: False               # 改为增量更新，降低 RViz 和 DDS 负载
 

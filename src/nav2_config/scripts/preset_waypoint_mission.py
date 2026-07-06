@@ -44,6 +44,14 @@ class ArmTask:
 
 
 @dataclass
+class DirectMotionTask:
+    enabled: bool = False
+    step_x: float = 0.0
+    step_y: float = 0.0
+    duration_sec: float = 0.0
+
+
+@dataclass
 class PlaceViaPoint:
     name: str
     x: float
@@ -56,6 +64,7 @@ class PlaceTask:
     enabled: bool = False
     target: str = 'auto'
     transfer_x: float = 3.85
+    column_mid_x: float = 2.275
     side_aisle_y: float = 1.55
     centerline_y: float = 0.0
     return_to_next_pick: bool = True
@@ -84,6 +93,7 @@ class Waypoint:
     target_class: str = ''
     yolo: YoloTask = field(default_factory=YoloTask)
     arm: ArmTask = field(default_factory=ArmTask)
+    direct_motion: DirectMotionTask = field(default_factory=DirectMotionTask)
     place: PlaceTask = field(default_factory=PlaceTask)
 
 
@@ -157,8 +167,6 @@ class PresetWaypointMission(Node):
         self.declare_parameter('arm_default_timeout_sec', 20.0)
         self.declare_parameter('arm_start_settle_sec', 1.0)
         self.declare_parameter('base_motion_lock_topic', '/base_motion/lock')
-        self.declare_parameter('base_motion_linear_only_topic', '/base_motion/linear_only')
-        self.declare_parameter('linear_only_x_tolerance', 0.15)
         self.declare_parameter('move_cmd_topic', '/move_cmd')
 
         self._waypoint_file = str(self.get_parameter('waypoint_file').value)
@@ -247,14 +255,8 @@ class PresetWaypointMission(Node):
         self._arm_start_settle_sec = max(
             0.0, float(self.get_parameter('arm_start_settle_sec').value)
         )
-        self._linear_only_x_tolerance = max(
-            0.0, float(self.get_parameter('linear_only_x_tolerance').value)
-        )
         base_motion_lock_topic = str(
             self.get_parameter('base_motion_lock_topic').value
-        )
-        base_motion_linear_only_topic = str(
-            self.get_parameter('base_motion_linear_only_topic').value
         )
         move_cmd_topic = str(self.get_parameter('move_cmd_topic').value)
 
@@ -265,9 +267,6 @@ class PresetWaypointMission(Node):
         self._yolo_result_pub = self.create_publisher(String, yolo_result_topic, 10)
         self._base_motion_lock_pub = self.create_publisher(
             Bool, base_motion_lock_topic, 10
-        )
-        self._base_motion_linear_only_pub = self.create_publisher(
-            Bool, base_motion_linear_only_topic, 10
         )
         self._move_cmd_pub = self.create_publisher(MoveCmd, move_cmd_topic, 10)
         self._yolo_sub = self.create_subscription(
@@ -339,14 +338,19 @@ class PresetWaypointMission(Node):
         self._arm_current_state = ''
         self._arm_state_update_sec = 0.0
         self._last_wait_arm_service_log_sec = 0.0
+        self._direct_motion_task_active = False
+        self._direct_motion_task_index: Optional[int] = None
+        self._direct_motion_deadline_sec = 0.0
+        self._direct_motion_step_x = 0.0
+        self._direct_motion_step_y = 0.0
         self._base_motion_locked = False
 
         self._set_yolo_enabled(False, force=True)
         self._set_base_motion_locked(False, force=True)
-        self._set_base_motion_linear_only(False)
 
         self.create_timer(0.2, self._tick)
         self.create_timer(0.05, self._publish_arm_base_stop)
+        self.create_timer(0.05, self._publish_direct_motion_cmd)
         self.create_timer(0.5, self._publish_visualization)
 
         self.get_logger().info(
@@ -465,6 +469,39 @@ class PresetWaypointMission(Node):
             continue_on_failure=continue_on_failure,
         )
 
+    def _parse_direct_motion_task(self, item: dict) -> DirectMotionTask:
+        raw_cfg = item.get('direct_motion', item.get('motion', False))
+        enabled = False
+        step_x = 0.0
+        step_y = 0.0
+        duration_sec = 0.0
+
+        if isinstance(raw_cfg, dict):
+            enabled = self._to_bool(raw_cfg.get('enabled', True))
+            step_x = float(raw_cfg.get('step_x', item.get('step_x', step_x)))
+            step_y = float(raw_cfg.get('step_y', item.get('step_y', step_y)))
+            duration_sec = max(
+                0.0,
+                float(
+                    raw_cfg.get(
+                        'duration_sec',
+                        raw_cfg.get('duration', item.get('duration_sec', duration_sec)),
+                    )
+                ),
+            )
+        else:
+            enabled = self._to_bool(raw_cfg)
+            step_x = float(item.get('step_x', step_x))
+            step_y = float(item.get('step_y', step_y))
+            duration_sec = max(0.0, float(item.get('duration_sec', duration_sec)))
+
+        return DirectMotionTask(
+            enabled=enabled and duration_sec > 0.0,
+            step_x=max(-1.0, min(1.0, step_x)),
+            step_y=max(-1.0, min(1.0, step_y)),
+            duration_sec=duration_sec,
+        )
+
     def _parse_place_via_points(self, raw_cfg: dict) -> List[PlaceViaPoint]:
         raw_via = raw_cfg.get('via', raw_cfg.get('via_points', []))
         if not isinstance(raw_via, list):
@@ -496,6 +533,7 @@ class PresetWaypointMission(Node):
         enabled = False
         target = 'auto'
         transfer_x = 3.85
+        column_mid_x = 2.275
         side_aisle_y = 1.55
         centerline_y = 0.0
         return_to_next_pick = True
@@ -505,6 +543,7 @@ class PresetWaypointMission(Node):
             enabled = self._to_bool(raw_cfg.get('enabled', False))
             target = str(raw_cfg.get('target', target)).strip()
             transfer_x = float(raw_cfg.get('transfer_x', transfer_x))
+            column_mid_x = float(raw_cfg.get('column_mid_x', column_mid_x))
             side_aisle_y = float(raw_cfg.get('side_aisle_y', side_aisle_y))
             centerline_y = float(raw_cfg.get('centerline_y', centerline_y))
             return_to_next_pick = self._to_bool(
@@ -524,6 +563,7 @@ class PresetWaypointMission(Node):
             enabled=enabled,
             target=target,
             transfer_x=transfer_x,
+            column_mid_x=column_mid_x,
             side_aisle_y=side_aisle_y,
             centerline_y=centerline_y,
             return_to_next_pick=return_to_next_pick,
@@ -576,6 +616,7 @@ class PresetWaypointMission(Node):
                     'enabled': True,
                     'target': str(cfg.get('target', 'auto')).strip() or 'auto',
                     'transfer_x': float(cfg.get('transfer_x', 3.85)),
+                    'column_mid_x': float(cfg.get('column_mid_x', 2.275)),
                     'side_aisle_y': float(cfg.get('side_aisle_y', 1.55)),
                     'centerline_y': float(cfg.get('centerline_y', 0.0)),
                     'return_to_next_pick': self._to_bool(
@@ -610,6 +651,24 @@ class PresetWaypointMission(Node):
                 cfg['yolo'] = False
             if not has_any_key('arm', 'arm_state'):
                 cfg['arm'] = 'none'
+            if not has_any_key('direct_motion', 'motion'):
+                cfg['direct_motion'] = False
+            if not has_any_key('place', 'place_after_pick'):
+                cfg['place'] = False
+        elif role in ('backoff', 'backup', 'reverse'):
+            set_if_missing('align_yaw', False)
+            set_if_missing('carry_mode', 'empty')
+            if not has_any_key('yolo', 'yolo_enabled'):
+                cfg['yolo'] = False
+            if not has_any_key('arm', 'arm_state'):
+                cfg['arm'] = 'none'
+            if not has_any_key('direct_motion', 'motion'):
+                cfg['direct_motion'] = {
+                    'enabled': True,
+                    'step_x': float(cfg.get('step_x', 0.0)),
+                    'step_y': float(cfg.get('step_y', 0.35)),
+                    'duration_sec': float(cfg.get('duration_sec', 1.0)),
+                }
             if not has_any_key('place', 'place_after_pick'):
                 cfg['place'] = False
         elif role == 'store':
@@ -735,6 +794,7 @@ class PresetWaypointMission(Node):
                     target_class=str(item.get('target_class', '')).strip(),
                     yolo=self._parse_yolo_task(item),
                     arm=self._parse_arm_task(item),
+                    direct_motion=self._parse_direct_motion_task(item),
                     place=self._parse_place_task(item),
                 )
             )
@@ -789,6 +849,56 @@ class PresetWaypointMission(Node):
             return fallback
         return math.atan2(dy, dx)
 
+    @staticmethod
+    def _place_side_from_y(y: float) -> str:
+        return 'left' if y >= 0.0 else 'right'
+
+    @staticmethod
+    def _back_pick_params(side: str) -> tuple[float, float, float, float]:
+        if side == 'left':
+            return 4.70, 3.70, 1.275, math.pi * 0.5
+        return 4.70, 3.70, -1.275, -math.pi * 0.5
+
+    @staticmethod
+    def _is_back_pick_waypoint(wp: Waypoint) -> bool:
+        if 'BACK' in wp.name.upper():
+            return True
+        return abs(normalize_angle(wp.yaw - math.pi)) < math.radians(35.0)
+
+    @staticmethod
+    def _is_extreme_place_for_side(target: PlaceTarget, side: str) -> bool:
+        if side == 'left':
+            return target.y > 0.75
+        return target.y < -0.75
+
+    def _retarget_next_back_pick_waypoints(self, start_index: int, side: str) -> None:
+        observe_x, pick_x, pick_y, _side_yaw = self._back_pick_params(side)
+        suffix = side.upper()
+        for index in range(start_index, min(start_index + 2, len(self._waypoints))):
+            wp = self._waypoints[index]
+            if wp.yolo.enabled:
+                wp.name = f'OBSERVE_{suffix}_BACK'
+                wp.x = observe_x
+                wp.y = pick_y
+                wp.yaw = math.pi
+                wp.approach_yaw = None
+                wp.align_yaw = True
+                self.get_logger().info(
+                    f'Retarget next observe waypoint to {wp.name}: '
+                    f'x={wp.x:.3f}, y={wp.y:.3f}, yaw=180.0deg'
+                )
+            elif wp.arm.enabled and wp.arm.state == 'pick':
+                wp.name = f'PICK_{suffix}_BACK'
+                wp.x = pick_x
+                wp.y = pick_y
+                wp.yaw = math.pi
+                wp.approach_yaw = None
+                wp.align_yaw = True
+                self.get_logger().info(
+                    f'Retarget next pick waypoint to {wp.name}: '
+                    f'x={wp.x:.3f}, y={wp.y:.3f}, yaw=180.0deg'
+                )
+
     def _resolve_place_target(self, wp: Waypoint) -> Optional[PlaceTarget]:
         target_key = wp.place.target.strip()
         if target_key and target_key.lower() not in ('auto', 'detected'):
@@ -841,6 +951,7 @@ class PresetWaypointMission(Node):
         arm_state: str = '',
         carry_mode: str = '',
         target_class: str = '',
+        direct_motion: Optional[DirectMotionTask] = None,
     ) -> Waypoint:
         return Waypoint(
             name=name,
@@ -856,6 +967,7 @@ class PresetWaypointMission(Node):
                 state=arm_state,
                 start_delay_sec=self._arm_start_settle_sec,
             ),
+            direct_motion=direct_motion or DirectMotionTask(),
             place=PlaceTask(enabled=False),
         )
 
@@ -942,6 +1054,105 @@ class PresetWaypointMission(Node):
             )
         )
 
+    def _build_back_pick_place_route(
+        self,
+        wp: Waypoint,
+        target: PlaceTarget,
+        transfer_x: float,
+    ) -> List[Waypoint]:
+        route: List[Waypoint] = []
+        carry_yaw = math.pi
+        pick_side = self._place_side_from_y(wp.y)
+        same_extreme_side = self._is_extreme_place_for_side(target, pick_side)
+
+        route.append(
+            self._make_waypoint(
+                f'{wp.name}_BACK_OVER_BUMP',
+                max(wp.x + 0.20, transfer_x - 0.20),
+                wp.y,
+                carry_yaw,
+                carry_mode='carry',
+                target_class=target.name,
+                direct_motion=DirectMotionTask(
+                    enabled=True,
+                    step_x=0.0,
+                    step_y=0.35,
+                    duration_sec=6.0,
+                ),
+            )
+        )
+        self._append_nav_waypoint_if_distinct(
+            route,
+            f'{wp.name}_AFTER_BUMP',
+            transfer_x,
+            wp.y,
+            carry_yaw,
+            'carry',
+            target.name,
+        )
+
+        if same_extreme_side:
+            self._append_nav_waypoint_if_distinct(
+                route,
+                f'{wp.name}_PLACE_BEHIND_{target.name}',
+                transfer_x,
+                target.y,
+                carry_yaw,
+                'carry',
+                target.name,
+            )
+            self._append_spin_waypoint_if_needed(
+                route,
+                f'{wp.name}_TURN_180_PLACE_{target.name}',
+                transfer_x,
+                target.y,
+                target.yaw,
+                'carry',
+                target.name,
+            )
+        else:
+            place_side_yaw = math.pi * 0.5 if target.y > wp.y else -math.pi * 0.5
+            self._append_spin_waypoint_if_needed(
+                route,
+                f'{wp.name}_TURN_90_PLACE_ROW_{target.name}',
+                transfer_x,
+                wp.y,
+                place_side_yaw,
+                'carry',
+                target.name,
+            )
+            self._append_nav_waypoint_if_distinct(
+                route,
+                f'{wp.name}_PLACE_BEHIND_{target.name}',
+                transfer_x,
+                target.y,
+                place_side_yaw,
+                'carry',
+                target.name,
+            )
+            self._append_spin_waypoint_if_needed(
+                route,
+                f'{wp.name}_TURN_90_FACE_PLACE_{target.name}',
+                transfer_x,
+                target.y,
+                target.yaw,
+                'carry',
+                target.name,
+            )
+
+        route.append(
+            self._make_waypoint(
+                f'{wp.name}_PLACE_{target.name}',
+                target.x,
+                target.y,
+                target.yaw,
+                'place',
+                carry_mode='place',
+                target_class=target.name,
+            )
+        )
+        return route
+
     def _insert_dynamic_place_route(self, wp: Waypoint) -> bool:
         if not wp.place.enabled or wp.name in self._dynamic_place_inserted_for:
             return False
@@ -959,9 +1170,22 @@ class PresetWaypointMission(Node):
         )
 
         transfer_x = wp.place.transfer_x
+        column_mid_x = wp.place.column_mid_x
         side_aisle_y = wp.place.side_aisle_y
         centerline_y = wp.place.centerline_y
         route: List[Waypoint] = []
+
+        if self._is_back_pick_waypoint(wp):
+            route = self._build_back_pick_place_route(wp, target, transfer_x)
+            insert_at = self._index + 1
+            self._waypoints[insert_at:insert_at] = route
+            self._dynamic_place_inserted_for.add(wp.name)
+            route_names = ' -> '.join(item.name for item in route)
+            self.get_logger().info(
+                f'Inserted back-pick place route after {wp.name}: target={target.name}, '
+                f'inserted_waypoints={len(route)}, route={route_names}'
+            )
+            return True
 
         if wp.place.via_points:
             for i, via in enumerate(wp.place.via_points):
@@ -984,29 +1208,10 @@ class PresetWaypointMission(Node):
                     )
                 )
         else:
-            centerline_yaw = self._heading_from_delta(0.0, centerline_y - wp.y, wp.yaw)
-            self._append_spin_waypoint_if_needed(
-                route,
-                f'{wp.name}_TURN_CENTERLINE',
-                wp.x,
-                wp.y,
-                centerline_yaw,
-                'carry',
-                target.name,
-            )
             self._append_nav_waypoint_if_distinct(
                 route,
-                f'{wp.name}_CENTERLINE',
-                wp.x,
-                centerline_y,
-                centerline_yaw,
-                'carry',
-                target.name,
-            )
-            self._append_spin_waypoint_if_needed(
-                route,
-                f'{wp.name}_TURN_TRANSFER',
-                wp.x,
+                f'{wp.name}_COLUMN_MID',
+                column_mid_x,
                 centerline_y,
                 0.0,
                 'carry',
@@ -1017,37 +1222,25 @@ class PresetWaypointMission(Node):
                 f'{wp.name}_TRANSFER',
                 transfer_x,
                 centerline_y,
-                self._heading_from_delta(transfer_x - wp.x, 0.0, wp.yaw),
+                0.0,
                 'carry',
                 target.name,
             )
+            if target.x >= transfer_x:
+                place_approach_x = min(target.x, transfer_x + 0.25)
+            else:
+                place_approach_x = max(target.x, transfer_x - 0.25)
             place_approach_yaw = self._heading_from_delta(
-                0.0, target.y - centerline_y, 0.0
-            )
-            self._append_spin_waypoint_if_needed(
-                route,
-                f'{wp.name}_TURN_PLACE_ROW_{target.name}',
-                transfer_x,
-                centerline_y,
-                place_approach_yaw,
-                'carry',
-                target.name,
+                place_approach_x - transfer_x,
+                target.y - centerline_y,
+                0.0,
             )
             self._append_nav_waypoint_if_distinct(
                 route,
-                f'{wp.name}_ALIGN_PLACE_{target.name}',
-                transfer_x,
+                f'{wp.name}_APPROACH_PLACE_{target.name}',
+                place_approach_x,
                 target.y,
                 place_approach_yaw,
-                'carry',
-                target.name,
-            )
-            self._append_spin_waypoint_if_needed(
-                route,
-                f'{wp.name}_TURN_PLACE_{target.name}',
-                transfer_x,
-                target.y,
-                target.yaw,
                 'carry',
                 target.name,
             )
@@ -1064,42 +1257,63 @@ class PresetWaypointMission(Node):
         )
 
         if wp.place.return_to_next_pick and next_wp is not None:
+            backoff_distance_m = 0.20
+            backoff_x = target.x - math.cos(target.yaw) * backoff_distance_m
+            backoff_y = target.y - math.sin(target.yaw) * backoff_distance_m
+            pickup_side = self._place_side_from_y(target.y)
+            observe_x, _pick_x, pickup_y, pickup_side_yaw = self._back_pick_params(pickup_side)
+            self._retarget_next_back_pick_waypoints(self._index + 1, pickup_side)
             route.append(
                 self._make_waypoint(
-                    f'{wp.name}_EXIT_PLACE',
-                    transfer_x,
-                    target.y,
-                    self._heading_from_delta(transfer_x - target.x, 0.0, target.yaw),
+                    f'{wp.name}_BACKOFF_20CM',
+                    backoff_x,
+                    backoff_y,
+                    target.yaw,
                     carry_mode='empty',
                     target_class=target.name,
+                    direct_motion=DirectMotionTask(
+                        enabled=True,
+                        step_x=0.0,
+                        step_y=0.35,
+                        duration_sec=1.0,
+                    ),
                 )
             )
-            route.append(
-                self._make_waypoint(
-                    f'{wp.name}_SIDE_AISLE',
-                    transfer_x,
-                    side_aisle_y,
-                    self._heading_from_delta(0.0, side_aisle_y - target.y, 0.0),
-                    carry_mode='empty',
-                )
+            self._append_spin_waypoint_if_needed(
+                route,
+                f'{wp.name}_TURN_{pickup_side.upper()}_90',
+                backoff_x,
+                backoff_y,
+                pickup_side_yaw,
+                'empty',
+                target.name,
             )
-            route.append(
-                self._make_waypoint(
-                    f'{wp.name}_NEXT_ROW',
-                    next_wp.x,
-                    side_aisle_y,
-                    self._heading_from_delta(next_wp.x - transfer_x, 0.0, math.pi),
-                    carry_mode='empty',
-                )
+            self._append_nav_waypoint_if_distinct(
+                route,
+                f'{wp.name}_GO_{pickup_side.upper()}_LANE',
+                backoff_x,
+                pickup_y,
+                pickup_side_yaw,
+                'empty',
+                target.name,
             )
-            route.append(
-                self._make_waypoint(
-                    f'{wp.name}_ALIGN_NEXT',
-                    next_wp.x,
-                    next_wp.y,
-                    self._heading_from_delta(0.0, next_wp.y - side_aisle_y, 0.0),
-                    carry_mode='empty',
-                )
+            self._append_nav_waypoint_if_distinct(
+                route,
+                f'{wp.name}_GO_{pickup_side.upper()}_BACK',
+                observe_x,
+                pickup_y,
+                pickup_side_yaw,
+                'empty',
+                target.name,
+            )
+            self._append_spin_waypoint_if_needed(
+                route,
+                f'{wp.name}_TURN_SCAN_{pickup_side.upper()}_BACK',
+                observe_x,
+                pickup_y,
+                math.pi,
+                'empty',
+                target.name,
             )
 
         insert_at = self._index + 1
@@ -1384,11 +1598,6 @@ class PresetWaypointMission(Node):
             f'Base motion {"locked" if locked else "unlocked"} for arm task.'
         )
 
-    def _set_base_motion_linear_only(self, enabled: bool) -> None:
-        msg = Bool()
-        msg.data = bool(enabled)
-        self._base_motion_linear_only_pub.publish(msg)
-
     def _publish_arm_base_stop(self) -> None:
         if not self._arm_task_active:
             return
@@ -1396,6 +1605,59 @@ class PresetWaypointMission(Node):
         msg.data = True
         self._base_motion_lock_pub.publish(msg)
         self._publish_base_stop()
+
+    def _publish_direct_motion_cmd(self) -> None:
+        if not self._direct_motion_task_active:
+            return
+        msg = MoveCmd()
+        msg.step_x = float(self._direct_motion_step_x)
+        msg.step_y = float(self._direct_motion_step_y)
+        self._move_cmd_pub.publish(msg)
+
+    def _start_direct_motion_task(self, wp: Waypoint) -> None:
+        now_sec = self._now_sec()
+        self._direct_motion_task_active = True
+        self._direct_motion_task_index = self._index
+        self._direct_motion_deadline_sec = now_sec + wp.direct_motion.duration_sec
+        self._direct_motion_step_x = wp.direct_motion.step_x
+        self._direct_motion_step_y = wp.direct_motion.step_y
+        self._active_goal_kind = 'direct_motion'
+        self._publish_direct_motion_cmd()
+        self.get_logger().info(
+            f'Starting direct motion [{self._index + 1}/{len(self._waypoints)}] '
+            f'{wp.name}: step_x={self._direct_motion_step_x:.3f}, '
+            f'step_y={self._direct_motion_step_y:.3f}, '
+            f'duration={wp.direct_motion.duration_sec:.2f}s'
+        )
+
+    def _tick_direct_motion_task(self) -> None:
+        if (
+            self._direct_motion_task_index is None
+            or self._direct_motion_task_index >= len(self._waypoints)
+        ):
+            self._finish_direct_motion_task()
+            return
+
+        self._publish_direct_motion_cmd()
+        if self._now_sec() < self._direct_motion_deadline_sec:
+            return
+
+        wp = self._waypoints[self._direct_motion_task_index]
+        self.get_logger().info(
+            f'Direct motion finished at {wp.name}: '
+            f'step_x={self._direct_motion_step_x:.3f}, '
+            f'step_y={self._direct_motion_step_y:.3f}'
+        )
+        self._finish_direct_motion_task()
+
+    def _finish_direct_motion_task(self) -> None:
+        self._direct_motion_task_active = False
+        self._direct_motion_task_index = None
+        self._direct_motion_deadline_sec = 0.0
+        self._direct_motion_step_x = 0.0
+        self._direct_motion_step_y = 0.0
+        self._publish_base_stop()
+        self._complete_waypoint()
 
     def _high_score_zone_callback(self, msg: Int32) -> None:
         zone = int(msg.data)
@@ -1428,6 +1690,9 @@ class PresetWaypointMission(Node):
         if self._arm_task_active:
             self._tick_arm_task()
             return
+        if self._direct_motion_task_active:
+            self._tick_direct_motion_task()
+            return
 
         now_sec = self._now_sec()
         if now_sec < self._next_send_time_sec:
@@ -1442,6 +1707,12 @@ class PresetWaypointMission(Node):
                 self._mission_done = True
                 self._set_yolo_enabled(False)
                 self.get_logger().info('Preset waypoint mission completed.')
+                return
+
+        if self._index < len(self._waypoints):
+            wp = self._waypoints[self._index]
+            if wp.direct_motion.enabled:
+                self._start_direct_motion_task(wp)
                 return
 
         if self._maybe_skip_already_reached_waypoint():
@@ -1547,19 +1818,15 @@ class PresetWaypointMission(Node):
         self._goal_pub.publish(goal_pose)
 
         if self._should_spin_to_current_waypoint():
-            self._set_base_motion_linear_only(False)
             self._send_spin_goal(wp)
             return
 
-        linear_only = self._is_axis_aligned_linear_only_segment(wp)
-        self._set_base_motion_linear_only(linear_only)
         goal = NavigateToPose.Goal()
         goal.pose = goal_pose
         self.get_logger().info(
             f'Sending waypoint [{self._index + 1}/{len(self._waypoints)}] '
             f'{wp.name}: x={wp.x:.3f}, y={wp.y:.3f}, yaw={self._effective_yaw(wp):.3f}, '
-            f'carry_mode={wp.carry_mode or "none"}, target_class={wp.target_class or "auto"}, '
-            f'linear_only={linear_only}'
+            f'carry_mode={wp.carry_mode or "none"}, target_class={wp.target_class or "auto"}'
         )
         future = self._action_client.send_goal_async(goal)
         future.add_done_callback(self._on_goal_response)
@@ -1588,18 +1855,6 @@ class PresetWaypointMission(Node):
         future.add_done_callback(self._on_spin_goal_response)
         self._active_goal_kind = 'spin'
         self._goal_in_flight = True
-
-    def _is_axis_aligned_linear_only_segment(self, wp: Waypoint) -> bool:
-        pose = self._get_robot_pose_for_skip(log_on_failure=True)
-        if pose is None:
-            return False
-
-        robot_x, robot_y, _ = pose
-        x_error = abs(wp.x - robot_x)
-        y_error = abs(wp.y - robot_y)
-        moving_y = x_error <= self._linear_only_x_tolerance and y_error > self._same_position_tolerance
-        moving_x = y_error <= self._linear_only_x_tolerance and x_error > self._same_position_tolerance
-        return moving_x or moving_y
 
     def _send_final_yaw_spin_if_needed(self, wp: Waypoint) -> bool:
         if not wp.align_yaw:
@@ -1766,7 +2021,6 @@ class PresetWaypointMission(Node):
         self._arm_start_ready_sec = now_sec + wp.arm.start_delay_sec
         self._arm_deadline_sec = self._arm_start_ready_sec + wp.arm.timeout_sec
         self._active_goal_kind = 'arm'
-        self._set_base_motion_linear_only(False)
         self._set_base_motion_locked(True)
         self.get_logger().info(
             f'Starting arm task at waypoint {wp.name}: '
@@ -1781,7 +2035,6 @@ class PresetWaypointMission(Node):
         self._arm_request_sent_sec = 0.0
         self._arm_start_ready_sec = 0.0
         self._arm_future = None
-        self._set_base_motion_linear_only(False)
         self._set_base_motion_locked(False)
         self._complete_waypoint()
 
@@ -1834,13 +2087,11 @@ class PresetWaypointMission(Node):
             wp = self._waypoints[self._index]
             if self._active_goal_kind == 'navigate' and not self._verify_nav_result_pose(wp):
                 self._goal_in_flight = False
-                self._set_base_motion_linear_only(False)
                 self._handle_goal_failure('pose_verify_failed')
                 return
 
             if self._active_goal_kind == 'spin' and not self._verify_spin_result_yaw(wp):
                 self._goal_in_flight = False
-                self._set_base_motion_linear_only(False)
                 self._handle_goal_failure('spin_yaw_verify_failed')
                 return
 
@@ -1849,7 +2100,6 @@ class PresetWaypointMission(Node):
                 f'({self._active_goal_kind}): {wp.name}'
             )
             self._goal_in_flight = False
-            self._set_base_motion_linear_only(False)
 
             if self._active_goal_kind == 'navigate' and self._send_final_yaw_spin_if_needed(wp):
                 return
@@ -1877,7 +2127,6 @@ class PresetWaypointMission(Node):
         self._arm_request_sent_sec = 0.0
         self._arm_start_ready_sec = 0.0
         self._arm_future = None
-        self._set_base_motion_linear_only(False)
         self._set_base_motion_locked(False)
 
         if wp.arm.continue_on_failure:
@@ -1902,7 +2151,6 @@ class PresetWaypointMission(Node):
         self._arm_request_sent_sec = 0.0
         self._arm_start_ready_sec = 0.0
         self._arm_future = None
-        self._set_base_motion_linear_only(False)
         self._set_base_motion_locked(False)
         self._set_yolo_enabled(False)
         self._mission_done = True
@@ -1932,7 +2180,12 @@ class PresetWaypointMission(Node):
         self._arm_request_sent_sec = 0.0
         self._arm_start_ready_sec = 0.0
         self._arm_future = None
-        self._set_base_motion_linear_only(False)
+        self._direct_motion_task_active = False
+        self._direct_motion_task_index = None
+        self._direct_motion_deadline_sec = 0.0
+        self._direct_motion_step_x = 0.0
+        self._direct_motion_step_y = 0.0
+        self._publish_base_stop()
         self._set_base_motion_locked(False)
 
         if self._stop_on_failure:
@@ -2044,6 +2297,8 @@ class PresetWaypointMission(Node):
     def _waypoint_text_style(wp: Waypoint, index: int) -> tuple[float, float, tuple[float, float, float, float], str]:
         if wp.yolo.enabled:
             return -0.18, 0.22, (0.0, 0.95, 1.0, 1.0), 'YOLO'
+        if wp.direct_motion.enabled:
+            return 0.0, 0.24, (1.0, 0.95, 0.1, 1.0), 'BACK'
         if wp.arm.enabled:
             if wp.arm.state == 'pick':
                 return 0.18, -0.22, (1.0, 0.45, 0.05, 1.0), 'PICK'

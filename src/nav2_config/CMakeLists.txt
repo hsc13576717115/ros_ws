@@ -20,6 +20,7 @@ install(
     scripts/wait_for_odom_activate_nav2.py
     scripts/preset_waypoint_mission.py
     scripts/print_current_pose.py
+    scripts/run_dog_runtime_logger.py
     scripts/lock_cpu_performance.sh
   DESTINATION lib/${PROJECT_NAME}
 )

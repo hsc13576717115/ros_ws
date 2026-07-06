@@ -65,6 +65,18 @@ def generate_launch_description():
         description='IMU pitch sign passed to the quadruped body controller'
     )
 
+    default_fast_gait_arg = DeclareLaunchArgument(
+        'default_fast_gait',
+        default_value='false',
+        description='Enable the fastest gait period instead of the normal default gait'
+    )
+
+    default_gait_arg = DeclareLaunchArgument(
+        'default_gait',
+        default_value='normal',
+        description='Default gait gear for navigation: lower, normal, fast, or fastest'
+    )
+
     use_sim_time_arg = DeclareLaunchArgument(
         'use_sim_time',
         default_value='false',
@@ -222,6 +234,24 @@ def generate_launch_description():
         description='Maximum map-frame XY distance allowed after Nav2 reports waypoint success'
     )
 
+    start_runtime_logger_arg = DeclareLaunchArgument(
+        'start_runtime_logger',
+        default_value='true',
+        description='Record run_dog pose, command velocity, move_cmd, goal, and scan summary CSV logs'
+    )
+
+    runtime_log_dir_arg = DeclareLaunchArgument(
+        'runtime_log_dir',
+        default_value='/home/orangepi/run_dog_logs',
+        description='Directory used by run_dog runtime logger'
+    )
+
+    runtime_log_rate_hz_arg = DeclareLaunchArgument(
+        'runtime_log_rate_hz',
+        default_value='10.0',
+        description='CSV sampling rate used by run_dog runtime logger'
+    )
+
     dog_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
             PathJoinSubstitution([vmc_config_dir, 'launch', 'dog.launch.py'])
@@ -234,6 +264,8 @@ def generate_launch_description():
             'start_body': LaunchConfiguration('start_body'),
             'start_imu': LaunchConfiguration('start_dog_imu'),
             'imu_pitch_sign': LaunchConfiguration('imu_pitch_sign'),
+            'default_fast_gait': LaunchConfiguration('default_fast_gait'),
+            'default_gait': LaunchConfiguration('default_gait'),
         }.items(),
     )
 
@@ -273,6 +305,9 @@ def generate_launch_description():
                 'arm_start_settle_sec': LaunchConfiguration('arm_start_settle_sec'),
                 'verify_reached_pose': LaunchConfiguration('verify_reached_pose'),
                 'reached_xy_tolerance': LaunchConfiguration('reached_xy_tolerance'),
+                'start_runtime_logger': LaunchConfiguration('start_runtime_logger'),
+                'runtime_log_dir': LaunchConfiguration('runtime_log_dir'),
+                'runtime_log_rate_hz': LaunchConfiguration('runtime_log_rate_hz'),
             }.items(),
         )
 
@@ -284,6 +319,8 @@ def generate_launch_description():
         start_body_arg,
         start_dog_imu_arg,
         imu_pitch_sign_arg,
+        default_fast_gait_arg,
+        default_gait_arg,
         use_sim_time_arg,
         imu_topic_arg,
         start_imu_arg,
@@ -311,6 +348,9 @@ def generate_launch_description():
         arm_start_settle_arg,
         verify_reached_pose_arg,
         reached_xy_tolerance_arg,
+        start_runtime_logger_arg,
+        runtime_log_dir_arg,
+        runtime_log_rate_hz_arg,
         dog_launch,
         TimerAction(
             period=8.0,
@@ -350,6 +390,9 @@ def generate_launch_description():
                 'arm_start_settle_sec': LaunchConfiguration('arm_start_settle_sec'),
                 'verify_reached_pose': LaunchConfiguration('verify_reached_pose'),
                 'reached_xy_tolerance': LaunchConfiguration('reached_xy_tolerance'),
+                'start_runtime_logger': LaunchConfiguration('start_runtime_logger'),
+                'runtime_log_dir': LaunchConfiguration('runtime_log_dir'),
+                'runtime_log_rate_hz': LaunchConfiguration('runtime_log_rate_hz'),
             }.items(),
         ),
     ])
