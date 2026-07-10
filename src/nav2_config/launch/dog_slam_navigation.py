@@ -264,6 +264,7 @@ def generate_launch_description():
             'start_body': LaunchConfiguration('start_body'),
             'start_imu': LaunchConfiguration('start_dog_imu'),
             'imu_pitch_sign': LaunchConfiguration('imu_pitch_sign'),
+            'dpad_down_jump': 'false',
             'default_fast_gait': LaunchConfiguration('default_fast_gait'),
             'default_gait': LaunchConfiguration('default_gait'),
         }.items(),
