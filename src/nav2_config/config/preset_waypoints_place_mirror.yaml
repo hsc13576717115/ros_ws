@@ -1,0 +1,72 @@
+yolo:
+  settle_sec: 1.0
+  timeout_sec: 3.0
+  min_score: 0.5
+place_targets:
+  class_0:
+    x: 5.2
+    y: -1.1
+    yaw_deg: 0.0
+    aliases:
+    - class0
+    - '0'
+    - food
+    - 食品
+  class_1:
+    x: 5.2
+    y: -0.4
+    yaw_deg: 0.0
+    aliases:
+    - class1
+    - '1'
+    - tool
+    - 工具
+  class_2:
+    x: 5.2
+    y: 0.4
+    yaw_deg: 0.0
+    aliases:
+    - class2
+    - '2'
+    - instrument
+    - 仪器
+  class_3:
+    x: 5.2
+    y: 1.1
+    yaw_deg: 0.0
+    aliases:
+    - class3
+    - '3'
+    - medicine
+    - 药品
+waypoints:
+- name: OBSERVE_01
+  role: observe
+  x: 1.0
+  y: 0.525
+  yaw_deg: 0.0
+- name: PICK_01
+  role: pick_auto_place
+  x: 1.6
+  y: 0.425
+  yaw_deg: 0.0
+  column_mid_x: 2.275
+  transfer_x: 4.9
+  centerline_y: 0.0
+  side_aisle_y: 1.55
+  return_to_next_pick: true
+- name: OBSERVE_NEXT_BACK
+  role: observe
+  x: 4.7
+  y: 1.125
+  yaw_deg: 180.0
+- name: PICK_NEXT_BACK
+  role: pick_auto_place
+  x: 3.7
+  y: 1.125
+  yaw_deg: 180.0
+  column_mid_x: 2.275
+  transfer_x: 4.9
+  centerline_y: 0.0
+  side_aisle_y: 1.55
+  return_to_next_pick: false
