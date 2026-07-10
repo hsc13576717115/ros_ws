@@ -14,8 +14,7 @@
 #   默认动态路线：抓取后先到两列中间点（y=0），再以 0° 直走过减速带到放置区，
 #   然后经一个斜向接近点进入对应 class 放置点，减少原地转向漂移。
 #   如果后面还有下一组观察/抓取点，第一次放置完成后固定去最左侧第二列箱子后方：
-#   先后退 20cm；若第一次放在最左侧，则原地转 180° 后去识别点；
-#   其他放置区统一左转 90° 到最左侧通道，再转到 180° 识别。
+#   先后退 20cm，再写死左转 80°；之后按放置区走到左后方识别/抓取点。
 # - pick：只抓取，不自动插入放置路线；后面可以手写 carry/place/return 点。
 # - carry：带箱普通途径点。
 # - place：机械臂 place；place.target=auto 时使用最近一次 YOLO class 对应放置区坐标。
@@ -38,26 +37,26 @@ place_targets:
     aliases: ['class0', '0', 'food', '食品']
   class_1:
     x: 5.2
-    y: 0.40
+    y: 0.2
     yaw_deg: 0.0
     aliases: ['class1', '1', 'tool', '工具']
   class_2:
     x: 5.2
-    y: -0.40
+    y: -0.60
     yaw_deg: 0.0
     aliases: ['class2', '2', 'instrument', '仪器']
   class_3:
     x: 5.2
-    y: -1.10
+    y: -1.350
     yaw_deg: 0.0
     aliases: ['class3', '3', 'medicine', '药品']
 
 waypoints:
-  - {name: OBSERVE_01, role: observe, x: 1.00, y: 0.525, yaw_deg: 0.0}
-  - {name: PICK_01, role: pick_auto_place, x: 1.6, y: 0.425, yaw_deg: 0.0, column_mid_x: 2.275, transfer_x: 4.90, centerline_y: 0.0, side_aisle_y: 1.55, return_to_next_pick: true}
+  - {name: OBSERVE_01, role: observe, x: 1.10, y: 0.30, yaw_deg: 0.0}
+  - {name: PICK_01, role: pick_auto_place, x: 1.41, y: 0.35, yaw_deg: 0.0, column_mid_x: 2.275, transfer_x: 4.90, centerline_y: 0.0, side_aisle_y: 1.55, return_to_next_pick: true}
 
-  - {name: OBSERVE_NEXT_BACK, role: observe, x: 4.70, y: 1.125, yaw_deg: 180.0}
-  - {name: PICK_NEXT_BACK, role: pick_auto_place, x: 3.70, y: 1.125, yaw_deg: 180.0, column_mid_x: 2.275, transfer_x: 4.90, centerline_y: 0.0, side_aisle_y: 1.55, return_to_next_pick: false}
+  - {name: OBSERVE_NEXT_BACK, role: observe, x: 4.6, y: 1.125, yaw_deg: 180.0}
+  - {name: PICK_NEXT_BACK, role: pick_auto_place, x: 3.05, y: 1.125, yaw_deg: 180.0, column_mid_x: 2.275, transfer_x: 4.90, centerline_y: 0.0, side_aisle_y: 1.55, return_to_next_pick: false}
 
   # - {name: OBSERVE_02, role: observe, x: 1.20, y: 0.425, yaw_deg: 0.0}
   # - {name: PICK_02, role: pick_auto_place, x: 1.45, y: 0.425, yaw_deg: 0.0, transfer_x: 4.60, side_aisle_y: 1.55, return_to_next_pick: true}

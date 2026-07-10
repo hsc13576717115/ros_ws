@@ -1081,7 +1081,7 @@ class PresetWaypointMission(Node):
                     enabled=True,
                     step_x=0.0,
                     step_y=0.35,
-                    duration_sec=6.0,
+                    duration_sec=2.0,
                 ),
             )
         )
@@ -1263,6 +1263,9 @@ class PresetWaypointMission(Node):
         if wp.place.return_to_next_pick and next_wp is not None:
             backoff_distance_m = 0.20
             post_place_y_offset_m = -0.15
+            post_backoff_turn_step_x = 0.18
+            post_backoff_turn_angle_rad = math.radians(80.0)
+            post_backoff_turn_duration_sec = 3.6
             backoff_x = target.x - math.cos(target.yaw) * backoff_distance_m
             backoff_y = (
                 target.y
@@ -1284,63 +1287,33 @@ class PresetWaypointMission(Node):
                         enabled=True,
                         step_x=0.0,
                         step_y=0.35,
-                        duration_sec=1.0,
+                        duration_sec=0.7,
                     ),
                 )
             )
-            if self._is_leftmost_place_target(target):
-                self._append_spin_waypoint_if_needed(
-                    route,
-                    f'{wp.name}_TURN_SCAN_LEFT_BACK',
+            route.append(
+                self._make_waypoint(
+                    f'{wp.name}_TURN_LEFT_80_FIXED',
                     backoff_x,
                     backoff_y,
-                    math.pi,
-                    'empty',
-                    target.name,
+                    normalize_angle(target.yaw + post_backoff_turn_angle_rad),
+                    carry_mode='empty',
+                    target_class=target.name,
+                    direct_motion=DirectMotionTask(
+                        enabled=True,
+                        step_x=post_backoff_turn_step_x,
+                        step_y=0.0,
+                        duration_sec=post_backoff_turn_duration_sec,
+                    ),
                 )
-                self._append_nav_waypoint_if_distinct(
-                    route,
-                    f'{wp.name}_GO_LEFT_BACK',
-                    observe_x,
-                    pickup_y,
-                    math.pi,
-                    'empty',
-                    target.name,
-                )
-            else:
-                self._append_spin_waypoint_if_needed(
-                    route,
-                    f'{wp.name}_TURN_LEFT_90',
-                    backoff_x,
-                    backoff_y,
-                    pickup_side_yaw,
-                    'empty',
-                    target.name,
-                )
+            )
+            if not self._is_leftmost_place_target(target):
                 self._append_nav_waypoint_if_distinct(
                     route,
                     f'{wp.name}_GO_LEFT_LANE',
                     backoff_x,
                     pickup_y,
                     pickup_side_yaw,
-                    'empty',
-                    target.name,
-                )
-                self._append_nav_waypoint_if_distinct(
-                    route,
-                    f'{wp.name}_GO_LEFT_BACK',
-                    observe_x,
-                    pickup_y,
-                    pickup_side_yaw,
-                    'empty',
-                    target.name,
-                )
-                self._append_spin_waypoint_if_needed(
-                    route,
-                    f'{wp.name}_TURN_SCAN_LEFT_BACK',
-                    observe_x,
-                    pickup_y,
-                    math.pi,
                     'empty',
                     target.name,
                 )
@@ -1369,7 +1342,8 @@ class PresetWaypointMission(Node):
             normalize_angle(self._effective_yaw(current) - self._effective_yaw(previous))
         )
         return (
-            position_delta <= self._same_position_tolerance
+            current.align_yaw
+            and position_delta <= self._same_position_tolerance
             and yaw_delta > self._same_yaw_tolerance
         )
 
@@ -1421,13 +1395,16 @@ class PresetWaypointMission(Node):
         yaw_delta = abs(normalize_angle(self._effective_yaw(wp) - robot_yaw))
         if (
             self._same_position_spin_enabled
+            and wp.align_yaw
             and xy_delta <= self._same_position_tolerance
             and yaw_delta > self._same_yaw_tolerance
         ):
             return False
+
+        yaw_reached = (not wp.align_yaw) or yaw_delta <= self._already_reached_yaw_tolerance
         if (
             xy_delta <= self._already_reached_xy_tolerance
-            and yaw_delta <= self._already_reached_yaw_tolerance
+            and yaw_reached
         ):
             self.get_logger().info(
                 f'Skipping already reached waypoint [{self._index + 1}/{len(self._waypoints)}] '
