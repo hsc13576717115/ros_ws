@@ -319,11 +319,11 @@ startup_idle_ee_linear_speed_limit: 0.32
 startup_idle_ee_linear_acc_limit: 0.32
 
 # 状态切换安全过渡点：每次进入 idle/pick/store/place 前先经过这里。
-transition_via_x: 0.40
+transition_via_x: 0.50
 transition_via_z: 0.30
 
 # 吸取状态：先拉高 GPIO36，再移动到吸取点。
-pick_x: 0.40
+pick_x: 0.50
 pick_z: -0.15
 pick_ee_linear_speed_limit: 0.80
 pick_ee_linear_acc_limit: 1.00
