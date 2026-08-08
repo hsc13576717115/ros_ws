@@ -7,6 +7,16 @@
 - 当前推荐链路：`Livox MID360 -> livox_ros_driver2 -> fast_lio -> nav2_config/pointcloud_to_scan.py -> Nav2 -> cmd_vel_to_move_cmd.py -> vmc_quadruped_controller`
 - 兼容链路：`Leishen N10P -> lslidar_driver + yesense_std_ros2 -> slam_config (Cartographer) -> Nav2`
 
+## 比赛实机视频
+
+### 第二十五届 ROBOCON 仿生足式机器人挑战赛
+
+[![仿生足式机器人比赛实机视频](docs/media/robocon-2026-quadruped-match.jpg)](https://github.com/hsc13576717115/ros_ws/releases/download/robocon-2026-videos/robocon-2026-quadruped-match.mp4)
+
+- 比赛结果：障碍赛一等奖、任务赛二等奖
+- 个人职责：队长，负责四足机器人运动控制与实机联调，个人承担约 60% 的主要研发工作
+- [观看或下载完整比赛视频](https://github.com/hsc13576717115/ros_ws/releases/download/robocon-2026-videos/robocon-2026-quadruped-match.mp4)
+
 ## 架构概览
 
 ```text
